@@ -1393,7 +1393,7 @@ function jsonp(url,timeoutMs=API_GET_TIMEOUT_MS){
 async function apiGet(action,params={}){
   // Apps Script redirects cross-origin fetches; JSONP goes straight to the
   // deployed endpoint and avoids waiting for a CORS failure before retrying.
-  return await jsonp(buildUrl(action,params));
+  try{return await jsonp(buildUrl(action,params));}catch(error){throw new Error(action+": "+String(error.message||error));}
 }
 async function apiPost(payload) {
   if (!API) throw new Error("LIVE API URL not configured. Tap LIVE API settings.");
@@ -1473,8 +1473,8 @@ async function verifyQuickOpenSession(saved){
     $("userBadge").textContent=(currentUser.name||currentUser.username||"User")+" • "+(isAdmin()?"Admin":"User");
     $("adminTab").classList.toggle("hidden",!isAdmin());$("adminPrefixGroup").classList.toggle("hidden",!isAdmin());
     renderMachineResults($("machineSearch").value||"");setSessionConnectionState(true);reliableButton();
-    loadEntries().finally(()=>{loadPlanningAssignments();loadMaster();if(isAdmin())loadUsers();});refreshQuickOpenButton();
-    v9OnLogin().catch(()=>{});if(window.meeraMonitorStart)window.meeraMonitorStart();
+    refreshQuickOpenButton();
+    await v9OnLogin();v9RefreshReportsWhenIdle();if(window.meeraMonitorStart)window.meeraMonitorStart();
   }catch(error){
     setSessionConnectionState(false,"Opened with your saved session. Server is unreachable, so this is read-only; shared entries can save after connection returns.");
   }
@@ -1497,8 +1497,7 @@ async function enterApp(token,user,verified=true){
   loadCachedData();
   if(verified){
     setSessionConnectionState(true);reliableButton();
-    loadEntries().finally(()=>{loadPlanningAssignments();loadMaster();if(isAdmin())loadUsers();});
-    v9OnLogin().catch(()=>{});if(window.meeraMonitorStart)window.meeraMonitorStart();
+    await v9OnLogin();v9RefreshReportsWhenIdle();if(window.meeraMonitorStart)window.meeraMonitorStart();
   }else{
     // Quick Open is read-only and must not treat device-local planning data as
     // authoritative. Wait for the shared server planning data.
@@ -2035,10 +2034,23 @@ async function v9ReviewHash(row){const p={...row.payload,action:"saveEntry",requ
 async function v9EnsureReviewPolicy(){
  const endpoint=typeof API==="string"?API:"",policyKey=sessionToken+"|"+endpoint;
  if(v9PolicySession===policyKey&&Date.now()-v9PolicyAt<120000)return;
- const owner=v9Owner(),token=sessionToken,d=await jsonp(buildUrl("rc5SavePolicy",{token}),45000);
+ const owner=v9Owner(),token=sessionToken,d=await jsonp(buildUrl("rc5SavePolicy",{token}),45000).catch(error=>{throw Error("POLICY CHECK: "+String(error.message||error));});
  if(!sessionVerified||owner!==v9Owner()||token!==sessionToken||endpoint!==(typeof API==="string"?API:""))throw Error("Account or server changed; queue retained for its owner.");
  if(!d||d.ok!==true||d.policy!==V9_REVIEW_POLICY)throw Error("Backend update required: deploy RC5_REVIEW_SAVE_V1. No review entry was resent.");
  v9PolicySession=policyKey;v9PolicyAt=Date.now();
+}
+let v9IdleRefreshTimer=null;
+function v9HasPendingWork(){return v9WorkerBusy||v9LastCount>0;}
+function v9RefreshReportsWhenIdle(){
+ if(v9IdleRefreshTimer)clearTimeout(v9IdleRefreshTimer);
+ const owner=v9Owner(),token=sessionToken;
+ const refresh=()=>{
+  v9IdleRefreshTimer=null;
+  if(!sessionVerified||v9Owner()!==owner||sessionToken!==token)return;
+  if(v9HasPendingWork()){v9IdleRefreshTimer=setTimeout(refresh,15000);return;}
+  loadEntries().finally(()=>{if(v9Owner()!==owner||sessionToken!==token)return;loadPlanningAssignments();loadMaster();if(isAdmin())loadUsers();});
+ };
+ refresh();
 }
 function v9QueueOrder(a,b){
  const sa=Number(a.localSeq)||0,sb=Number(b.localSeq)||0;
@@ -2259,7 +2271,7 @@ async function v9RefreshUi(){
   const status=$("v9QueueSummary");
   status.textContent=waiting.some(r=>r.state==="REVIEW_REQUIRED")?
     "Admin-review entries will be durably saved to the Sheet in FIFO order; full local payload is retained.":
-    waiting.length?"Local queue is safe on this browser profile. Server verification runs in the background; keep the browser open when possible.":
+    waiting.length?"Pending entries sync first; automatic reports refresh afterward. Full entries remain safe on this browser. Keep this tab open.":
     "No unverified entries in this browser. The server is the authority for saved entries.";
   const now=Date.now();
   v9ScheduleArchiveRefresh(rows,now);
@@ -2312,7 +2324,7 @@ function v9Schedule(ms=15000){
 async function v9CheckStatus(row){
  if(!currentUser||!sessionVerified||v9Owner()!==row.owner)throw Error("Log in as the queued entry owner before verifying");
  const owner=v9Owner(),token=sessionToken,payloadHash=await v9ReviewHash(row);
- const data=await jsonp(buildUrl("checkSaveStatus",{token,requestId:row.requestId,box:row.box,netW:row.payload.netW??"",payloadHash}),60000);
+ const data=await jsonp(buildUrl("checkSaveStatus",{token,requestId:row.requestId,box:row.box,netW:row.payload.netW??"",payloadHash}),60000).catch(error=>{throw Error("RECEIPT CHECK: "+String(error.message||error));});
  if(owner!==v9Owner()||token!==sessionToken)throw Error("Account changed; no queue state accepted.");
  if(!data||data.ok!==true)throw Error(data?.error||"Verification endpoint error");
  const status=String(data.status||"").toUpperCase();
@@ -2417,9 +2429,13 @@ async function v9Process(row){
   // Verified policy makes full-payload same-ID intake idempotent; do not block upload on an older status poll.
   if(!sessionVerified||v9Owner()!==row.owner)return;
   row=await v9Change(row.requestId,{state:"SENDING",attempts:(row.attempts||0)+1,lastPostedAt:Date.now(),nextCheckAt:Date.now()+V9_RECHECK_MS,lastError:"Full entry is being saved; server proof pending."});
-  await v9PostOnce(row);
+  const sending=v9PostOnce(row).catch(()=>{});
   if(!sessionVerified||v9Owner()!==row.owner)return;
-  const status=await v9CheckStatus(row);if(await v9ApplyStatus(row,status))return;
+  let status=await v9CheckStatus(row);if(await v9ApplyStatus(row,status))return;
+  // An early NOT_FOUND/CLOUD_RECEIVED may race the POST. Await transport once,
+  // then read proof again. Never equate opaque POST completion with a receipt.
+  await sending;if(!sessionVerified||v9Owner()!==row.owner)return;
+  status=await v9CheckStatus(row);if(await v9ApplyStatus(row,status))return;
   await v9Change(row.requestId,{state:"PENDING",nextCheckAt:Date.now()+V9_RECHECK_MS,lastError:row.serverProof?.reason||"Awaiting durable Sheet receipt. Same ID retained."});
  }catch(error){if(v9Owner()!==row.owner)return;await v9Change(row.requestId,{state:"PENDING",nextCheckAt:Date.now()+Math.min(60000,5000*Math.max(1,row.attempts||1)),lastError:String(error.message||error).slice(0,180)});}
 }
@@ -2960,6 +2976,7 @@ async function fetchMiPlanAll(){
   catch(backendError){const data=await miJsonp();if(!data||data.status!=="ok")throw backendError||new Error("invalid planning response");const pm=parseMiPlan(data);return{assign:null,plan:pm.plan,metallics:pm.metallics}}
 }
 async function refreshAllPlanning(force){
+  if(v9HasPendingWork())return; // Queue saves take priority over planning retries/focus refresh.
   const now=Date.now();
   if(planningFetching)return;
   if(!force&&now-planningLastFetch<45000)return;
@@ -3094,7 +3111,7 @@ if(de&&se){const untouched=!autoShiftLast.date||(de.value===autoShiftLast.date&&
 if(me){const mu=!me.dataset.auto||me.value===me.dataset.auto;if(mu){me.value=s.shift;me.dataset.auto=s.shift}}}
 setInterval(()=>applyAutoShift(false),30000);
 // Keep machine/product assignments current while the app is open; refresh on return to the tab too.
-setInterval(()=>{if(sessionToken&&document.visibilityState==="visible")refreshAllPlanning(false)},60000);
+setInterval(()=>{if(sessionToken&&document.visibilityState==="visible"&&!v9HasPendingWork())refreshAllPlanning(false)},60000);
 document.addEventListener("visibilitychange",()=>{if(sessionToken&&document.visibilityState==="visible")refreshAllPlanning(true)});
 window.addEventListener("focus",()=>{if(sessionToken)refreshAllPlanning(true)});
 $("miReloadBtn").addEventListener("click",()=>{miStockShow("Reloading stock from Google Sheet…","ok");miLoadStock().then(()=>miStockShow("✓ Stock reloaded from the MATERIAL STOCK sheet tab.","ok"))});
