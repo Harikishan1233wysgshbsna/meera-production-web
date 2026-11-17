@@ -1364,7 +1364,7 @@ function setSessionConnectionState(verified,message){
   sessionVerified=!!verified;
   v9SetButton();
   if(sessionVerified)hideStatus("connectionBanner");
-  else showStatus("connectionBanner",message||"Quick Open is in read-only mode while the server session is checked. Shared saves need a connection.","info");
+  else showStatus("connectionBanner",message||"Server login is being checked. Entries can save on this phone; cloud upload waits for verified login.","info");
 }
 
 /* -------- Existing sheet API helpers -------- */
@@ -1487,7 +1487,7 @@ async function verifyQuickOpenSession(saved){
     refreshQuickOpenButton();
     await v9OnLogin();v9RefreshReportsWhenIdle();if(window.meeraMonitorStart)window.meeraMonitorStart();
   }catch(error){
-    setSessionConnectionState(false,"Opened with your saved session. Server is unreachable, so this is read-only; shared entries can save after connection returns.");
+    setSessionConnectionState(false,"Server is unreachable. You can save entries on this phone; reconnect and verify login to upload them.");
   }
 }
 async function restoreSession(){
@@ -1496,7 +1496,7 @@ async function restoreSession(){
   refreshQuickOpenButton();return false;
 }
 async function enterApp(token,user,verified=true){
-  sessionToken=token;currentUser=user||{};currentUser.machines=normaliseMachines(currentUser.machines);currentUser.rollTypes=normaliseRollTypes(currentUser.rollTypes);currentUser.boxPrefix=getBoxPrefixForUser(currentUser);
+  sessionVerified=!!verified;sessionToken=token;currentUser=user||{};currentUser.machines=normaliseMachines(currentUser.machines);currentUser.rollTypes=normaliseRollTypes(currentUser.rollTypes);currentUser.boxPrefix=getBoxPrefixForUser(currentUser);
   localStorage.setItem(SESSION_KEY,JSON.stringify({token:sessionToken,user:currentUser}));
   allowedMachines=isAdmin()?allMachines():currentUser.machines;
   $("loginView").classList.add("hidden");$("appShell").classList.remove("hidden");
@@ -1510,13 +1510,16 @@ async function enterApp(token,user,verified=true){
     setSessionConnectionState(true);reliableButton();
     await v9OnLogin();v9RefreshReportsWhenIdle();if(window.meeraMonitorStart)window.meeraMonitorStart();
   }else{
-    // Quick Open is read-only and must not treat device-local planning data as
+    // Local entry capture is available while server authentication is pending.
+    // Cached planning is not treated as current authoritative planning.
+    await v9OnLogin();
+    // Quick Open must not treat device-local planning data as
     // authoritative. Wait for the shared server planning data.
     planningAssignments=Object.create(null);
     planningLoaded=false;
     planningLoadError="Waiting for live Production Planning from the shared server.";
     updateProductControl();
-    setSessionConnectionState(false,"Quick Open: waiting for the shared server. Product selection is disabled until live planning is loaded.");
+    setSessionConnectionState(false,"Quick Open: phone saves are available. Cloud upload and current planning wait for verified server login.");
   }
 }
 function showLogin(){
@@ -2168,9 +2171,10 @@ async function v9Release(owner=v9Owner()){
 }
 function v9SetButton(){
   const b=$("saveButton");if(!b)return;
-  const available=!!currentUser && sessionVerified && v9StorageReady && !v9LocalBusy && !v9CorruptLegacy;
+  const available=!!currentUser && v9StorageReady && !v9LocalBusy && !v9CorruptLegacy;
   b.disabled=!available;
-  b.textContent=v9LocalBusy?"⏳ Saving local backup…":available?"⚡ Queue Entry (FAST)":"⚡ Queue unavailable";
+  b.textContent=v9LocalBusy?"⏳ Saving local backup…":available?(sessionVerified?"⚡ Queue Entry (FAST)":"💾 Save on phone — offline"):!currentUser?"Sign in to save":!v9StorageReady?"Preparing phone storage…":"Phone storage needs attention";
+  b.title=available?(sessionVerified?"Save the full entry on this phone first":"Save locally now; cloud upload waits for verified login"):"Local storage must be ready before an entry can be saved.";
 }
 function reliableButton(){v9SetButton()}
 function reliablePending(){return null} // Legacy UI replaced by the V9 queue.
@@ -2619,7 +2623,6 @@ async function saveEntry(event){
     return;
   }
   if(!currentUser){showLogin();return}
-  if(!sessionVerified){showStatus("formStatus","This session is offline/read-only. Reconnect before saving.","err");return}
   const machineText=$("machine").value||$("machineSearch").value.replace(/[^0-9]/g,"");const machine=Number(machineText);
   const selectedRollType=rollTypeCode($("rollType").value),selectedProduct=$("selectedProduct").value.trim();
   const product=selectedProduct||$("prodSearch").value.trim(),productRecord=uniqueProducts().find(p=>normaliseProductKey(p.name)===normaliseProductKey(product))||{yarn:$("yarnCode").value||""};
@@ -2654,7 +2657,7 @@ async function saveEntry(event){
     void v9StartImmediateHandoff(stored); // schedule FIFO worker, never bypass earlier entries
     v9KnownBoxes.add(finalBox);
     v9PrepareNextForm(finalBox);
-    showStatus("formStatus","✓ SAVED ON PHONE: "+finalBox+". Cloud upload started; receipt not yet verified. You can enter next box.","info");
+    showStatus("formStatus","✓ SAVED ON PHONE: "+finalBox+(sessionVerified?". Queued for cloud upload; server confirmation pending.":". Offline copy सुरक्षित है; cloud upload के लिए online login verify होना बाकी है।"),"info");
     await v9RefreshUi();
     v9Schedule(50);
     // Optional admin inbox report is never on the critical path of local Save.
@@ -2962,7 +2965,7 @@ document.addEventListener("DOMContentLoaded",async()=>{
   document.getElementById("v1022AdminHistory")?.addEventListener("click",v1022LoadAdminHistory);
   document.getElementById("v1027OpenEntry")?.addEventListener("click",()=>showView("entry"));
   $("loginForm").addEventListener("submit",login);window.__meeraLoginHandlerReady=true;$("quickOpenButton").addEventListener("click",quickOpenSavedSession);$("historyToggle").addEventListener("click",toggleHistory);$("logoutButton").addEventListener("click",logout);
-  $("entryForm").addEventListener("submit",saveEntry);v9SetButton();v9ObserveQueuePanel();
+  $("entryForm").addEventListener("submit",event=>saveEntry(event).catch(error=>showStatus("formStatus","Save could not finish: "+(error.message||"Unexpected error")+". Keep the form and check the local queue before entering it again.","err")));v9SetButton();v9ObserveQueuePanel();
   $("v9SyncNow").addEventListener("click",()=>v9Schedule(20));
   $("v9Export").addEventListener("click",()=>v9Export().catch(e=>showStatus("formStatus",e.message,"err")));
   $("v9ClearOldLocal").addEventListener("click",()=>meeraClearOldLocalData().catch(e=>meeraRecoverySay('Clear not completed: '+e.message+'. Preserve your downloaded backup.')));
