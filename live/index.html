@@ -924,7 +924,7 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
     <section id="view-entry" class="view">
       <div class="card">
         <h2>📋 Movement Details — New Entry</h2>
-        <form id="entryForm">
+        <form novalidate id="entryForm">
           <div class="form-grid mobile-entry-grid">
             <div class="form-group">
               <label for="date">Date *</label>
@@ -2007,7 +2007,7 @@ function saveLocalBackup(row){
 const V9_DB_NAME="meera_production_test_v9_queue";
 const V9_DB_VERSION=2;
 const V9_LEGACY_PREFIX="meera_test_pending_v1_";
-const V9_FINAL_STATES=new Set(["SAVED","DUPLICATE","ON_SERVER"]);
+const V9_FINAL_STATES=new Set(["SAVED","SAVED_REVIEW","DUPLICATE","ON_SERVER"]);
 const V9_RECHECK_MS=15000;
 const V9_RETRY_GRACE_MS=90000;
 const V9_MAX_POST_ATTEMPTS=3;
@@ -2023,6 +2023,31 @@ function reliableId(){
     return "test-"+Array.from(a,x=>x.toString(16).padStart(2,"0")).join("");
   }
   throw new Error("Secure Request ID generation not available. No data sent.");
+}
+const V9_REVIEW_POLICY="RC5_REVIEW_SAVE_V1";
+let v9PolicySession="",v9PolicyAt=0;
+function v9ReviewClean(value){
+ if(Array.isArray(value))return value.map(v9ReviewClean);
+ if(value&&typeof value==="object"){const out=Object.create(null);Object.keys(value).sort().forEach(k=>{if(!["token","callback","payloadHash","receiptKey","queueSequence","reviewSaveVersion"].includes(k))out[k]=v9ReviewClean(value[k]);});return out;}
+ return value;
+}
+async function v9ReviewHash(row){const p={...row.payload,action:"saveEntry",requestId:row.requestId};const bytes=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify(v9ReviewClean(p))));return [...new Uint8Array(bytes)].map(v=>v.toString(16).padStart(2,"0")).join("");}
+async function v9EnsureReviewPolicy(){
+ const endpoint=typeof API==="string"?API:"",policyKey=sessionToken+"|"+endpoint;
+ if(v9PolicySession===policyKey&&Date.now()-v9PolicyAt<120000)return;
+ const owner=v9Owner(),token=sessionToken,d=await jsonp(buildUrl("rc5SavePolicy",{token}),45000);
+ if(!sessionVerified||owner!==v9Owner()||token!==sessionToken||endpoint!==(typeof API==="string"?API:""))throw Error("Account or server changed; queue retained for its owner.");
+ if(!d||d.ok!==true||d.policy!==V9_REVIEW_POLICY)throw Error("Backend update required: deploy RC5_REVIEW_SAVE_V1. No review entry was resent.");
+ v9PolicySession=policyKey;v9PolicyAt=Date.now();
+}
+function v9QueueOrder(a,b){
+ const sa=Number(a.localSeq)||0,sb=Number(b.localSeq)||0;
+ if(sa&&sb)return sa-sb||String(a.requestId).localeCompare(String(b.requestId));
+ return String(a.createdAt||"").localeCompare(String(b.createdAt||""))||sa-sb||String(a.requestId).localeCompare(String(b.requestId));
+}
+async function v9MigrateReviewQueue(){
+ const owner=v9Owner(),rows=await v9GetAll(owner);
+ for(const row of rows){if(v9Owner()!==owner)return;if(["REVIEW_REQUIRED","DUPLICATE","ON_SERVER"].includes(row.state)&&row.payload&&Object.prototype.hasOwnProperty.call(row.payload,"netW"))await v9Change(row.requestId,{state:"PENDING",nextCheckAt:0,lastError:"Retained full entry scheduled for durable Sheet review intake with its original Request ID."});}
 }
 function v9Owner(){return String(currentUser&&currentUser.username||"").trim().toLowerCase()}
 function v9IsActive(e){return !V9_FINAL_STATES.has(e.state)}
@@ -2090,7 +2115,7 @@ function v9Insert(record){
 function v9Put(record){return v9Transaction("entries","readwrite",(s)=>{s.put(record)})}
 function v9Get(id){return v9Transaction("entries","readonly",(s,set)=>{s.get(id).onsuccess=e=>set(e.target.result||null)})}
 function v9GetAll(owner){return v9Transaction("entries","readonly",(s,set)=>{
-  s.index("owner").getAll(owner).onsuccess=e=>set((e.target.result||[]).sort((a,b)=>(Number(a.localSeq)||0)-(Number(b.localSeq)||0)||a.requestId.localeCompare(b.requestId)));
+  s.index("owner").getAll(owner).onsuccess=e=>set((e.target.result||[]).sort(v9QueueOrder));
 })}
 async function v9Change(id,patch){
   const old=await v9Get(id);if(!old)throw new Error("Queue entry disappeared; stop and check backup");
@@ -2219,21 +2244,21 @@ function v9ObserveQueuePanel(){
     check();
   }
 }
-function v9StatusLabel(state){return ({QUEUED:"Queued locally",SENDING:"Sending (not verified)",PENDING:"Pending verification",CLOUD_RECEIVED:"Received in cloud — Production pending",SAVED:"Verified saved",DUPLICATE:"Duplicate rejected",ON_SERVER:"Already in PRODUCTION DATA",REVIEW_REQUIRED:"Admin review"})[state]||"Needs attention"}
-function v9StatusClass(state){return state==="SAVED"?"ok":state==="DUPLICATE"||state==="REVIEW_REQUIRED"?"err":"info"}
+function v9StatusLabel(state){return ({QUEUED:"Queued locally",SENDING:"Sending (not verified)",PENDING:"Pending verification",CLOUD_RECEIVED:"Received in cloud — Production pending",SAVED:"Verified saved",SAVED_REVIEW:"Saved in Sheet — admin review",DUPLICATE:"Duplicate rejected",ON_SERVER:"Already in PRODUCTION DATA",REVIEW_REQUIRED:"Admin review"})[state]||"Needs attention"}
+function v9StatusClass(state){return state==="SAVED_REVIEW"?"info":state==="SAVED"?"ok":state==="DUPLICATE"||state==="REVIEW_REQUIRED"?"err":"info"}
 async function v9RefreshUi(){
   if(!currentUser||!v9Db)return;
   const owner=v9Owner(),rows=await v9GetAll(owner);
   if(v9Owner()!==owner)return;
   v9KnownBoxes=new Set(rows.map(r=>r.box));
-  const waiting=rows.filter(v9IsActive),verified=rows.filter(r=>r.state==="SAVED"||r.state==="ON_SERVER").length,rejected=rows.filter(r=>r.state==="DUPLICATE").length;
+  const waiting=rows.filter(v9IsActive),verified=rows.filter(r=>r.state==="SAVED"||r.state==="SAVED_REVIEW"||r.state==="ON_SERVER").length,rejected=rows.filter(r=>r.state==="DUPLICATE").length;
   v9LastCount=waiting.length;
   $("v9QueuedCount").textContent=waiting.length;
   $("v9SavedCount").textContent=verified;
   $("v9RejectedCount").textContent=rejected;
   const status=$("v9QueueSummary");
   status.textContent=waiting.some(r=>r.state==="REVIEW_REQUIRED")?
-    "⚠ ADMIN REVIEW needed. Other distinct boxes can continue syncing; this box stays on hold.":
+    "Admin-review entries will be durably saved to the Sheet in FIFO order; full local payload is retained.":
     waiting.length?"Local queue is safe on this browser profile. Server verification runs in the background; keep the browser open when possible.":
     "No unverified entries in this browser. The server is the authority for saved entries.";
   const now=Date.now();
@@ -2261,10 +2286,10 @@ async function v9MigrateLegacy(){
   if(!raw)return;
   let old;
   try{old=JSON.parse(raw)}catch(e){v9CorruptLegacy=true;throw new Error("Old V4/V7 pending backup unreadable. Do NOT clear browser data.")}
-  if(!old || !old.requestId || !old.box || !old.payload || !old.payload.machine){v9CorruptLegacy=true;throw new Error("Old pending record invalid. Contact admin before new entries.")}
+  if(!old || !old.requestId || !old.payload || typeof old.payload!=="object"){v9CorruptLegacy=true;throw new Error("Old pending record invalid. Contact admin before new entries.")}
   if(await v9Get(old.requestId))return;
   const clean={...old.payload};delete clean.token;
-  const box=String(old.box).trim().toUpperCase();
+  const box=String(old.box??old.payload.box??"").trim().toUpperCase();
   try{
     await v9Insert({requestId:old.requestId,owner,ownerBox:owner+"|"+box,box,payload:clean,
       createdAt:old.createdAt||new Date().toISOString(),state:"PENDING",attempts:1,
@@ -2274,7 +2299,7 @@ async function v9MigrateLegacy(){
 async function v9OnLogin(){
   if(!currentUser)return;
   try{
-    await v9Open();await v9MigrateLegacy();
+    await v9Open();await v9MigrateLegacy();await v9MigrateReviewQueue();
     v9StorageReady=true;v9CorruptLegacy=false;
     await v9RefreshUi();v9Schedule(120);
     if(navigator.storage&&navigator.storage.persist)navigator.storage.persist().catch(()=>{});
@@ -2285,21 +2310,17 @@ function v9Schedule(ms=15000){
   v9Timer=setTimeout(()=>{v9Timer=null;v9Work().catch(e=>{v9LastStatus=e.message||"Queue worker error";v9Schedule(20000)})},ms);
 }
 async function v9CheckStatus(row){
-  if(!currentUser||!sessionVerified)throw new Error("Log in online before verifying");
-  const data=await jsonp(buildUrl("checkSaveStatus",{
-    token:sessionToken,requestId:row.requestId,box:row.box,machine:String(row.payload.machine)
-  }),16000);
-  if(!data||data.ok!==true)throw new Error(data&&data.error||"Verification endpoint error");
-  const state=String(data.status||"").trim().toUpperCase();
-  if(state==="BACKUP_REPAIR_REQUIRED")return "REVIEW_REQUIRED";
-  if(!["CONFIRMED","DUPLICATE_BOX","REVIEW_REQUIRED","PENDING","NOT_FOUND"].includes(state))throw new Error("Unexpected response: "+state);
-  if(state==="CONFIRMED"||state==="DUPLICATE_BOX"||state==="PENDING"){
-    if(String(data.requestId||"")!==row.requestId||String(data.box||"").toUpperCase()!==row.box)
-      throw new Error("Confirmation identity mismatch; keep pending and ask admin");
-  }
-  // In the matching RC5 backend PENDING means this Request ID has an
-  // authenticated server backup row, while Production is not yet confirmed.
-  return state==="PENDING"?"CLOUD_RECEIVED":state;
+ if(!currentUser||!sessionVerified||v9Owner()!==row.owner)throw Error("Log in as the queued entry owner before verifying");
+ const owner=v9Owner(),token=sessionToken,payloadHash=await v9ReviewHash(row);
+ const data=await jsonp(buildUrl("checkSaveStatus",{token,requestId:row.requestId,box:row.box,netW:row.payload.netW??"",payloadHash}),60000);
+ if(owner!==v9Owner()||token!==sessionToken)throw Error("Account changed; no queue state accepted.");
+ if(!data||data.ok!==true)throw Error(data?.error||"Verification endpoint error");
+ const status=String(data.status||"").toUpperCase();
+ if(!["CONFIRMED","REVIEW_SAVED","REVIEW_REQUIRED","NOT_FOUND","CLOUD_RECEIVED"].includes(status))throw Error("Unexpected review status: "+status);
+ if(["CONFIRMED","REVIEW_SAVED","CLOUD_RECEIVED"].includes(status)){
+  if(String(data.requestId)!==row.requestId||String(data.box??"").trim().toUpperCase()!==String(row.box??"").trim().toUpperCase()||String(data.owner).toLowerCase()!==row.owner||data.payloadHash!==payloadHash||!Number.isInteger(Number(data.row))||Number(data.row)<2||!["PRODUCTION_DATA","RC5_SAVE_RECEIPTS"].includes(data.source))throw Error("Receipt identity mismatch. Full local payload retained.");
+ }
+ row.serverProof=data;return status;
 }
 // Read-only server reconciliation for an old or manually completed box.
 // This endpoint performs an exact box lookup ONLY for an unresolved local item,
@@ -2345,44 +2366,19 @@ async function v9ResolveExistingBox(row){
   return false;
 }
 async function v9ApplyStatus(row,status){
-  if(status==="CLOUD_RECEIVED"){
-    await v9Change(row.requestId,{state:"CLOUD_RECEIVED",cloudReceivedAt:row.cloudReceivedAt||new Date().toISOString(),
-      nextCheckAt:Date.now()+V9_RECHECK_MS,lastError:"Server backup received. Production pending; full local copy retained."});
-    return true;
-  }
-  if(status==="CONFIRMED"){
-    // After verified server save, release the full mobile payload. Keep only
-    // request-ID/box audit metadata; LIVE Production + Backup hold the entry.
-    await v9Change(row.requestId,{state:"SAVED",verifiedAt:new Date().toISOString(),nextCheckAt:0,lastError:"",
-      payload:{action:"saveEntry",requestId:row.requestId,box:row.box,machine:row.payload.machine,unit:row.payload.unit}});
-    reliableLastConfirmed={box:row.box,unit:row.payload.unit,machine:row.payload.machine};
-    const key=V9_LEGACY_PREFIX+row.owner;
-    try{const old=JSON.parse(localStorage.getItem(key)||"null");if(old&&old.requestId===row.requestId)localStorage.removeItem(key)}catch(e){}
-    return true;
-  }
-  if(status==="DUPLICATE_BOX"){
-    // Server has not stored this Request ID. Never call this SAVED or purge its payload.
-    await v9Change(row.requestId,{state:"REVIEW_REQUIRED",nextCheckAt:0,
-      lastError:"Server rejected this Box as duplicate. Original payload PRESERVED. Apps Script must allow distinct Request IDs for review."});
-    const key=V9_LEGACY_PREFIX+row.owner;
-    try{const old=JSON.parse(localStorage.getItem(key)||"null");if(old&&old.requestId===row.requestId)localStorage.removeItem(key)}catch(e){}
-    return true;
-  }
-  if(status==="REVIEW_REQUIRED"){
-    // A request may briefly appear inconsistent while the POST is still
-    // completing. Wait rather than prematurely marking an admin conflict.
-    if(row.lastPostedAt && Date.now()-row.lastPostedAt<V9_RETRY_GRACE_MS){
-      await v9Change(row.requestId,{state:"PENDING",nextCheckAt:Date.now()+V9_RECHECK_MS,lastError:"In-flight save may not be fully confirmed yet."});return false;
-    }
-    await v9Change(row.requestId,{state:"REVIEW_REQUIRED",nextCheckAt:0,lastError:"Server requires administrator review. No automatic retry."});return true;
-  }
-  await v9Change(row.requestId,{state:"PENDING",nextCheckAt:Date.now()+V9_RECHECK_MS,lastError:"Awaiting server confirmation ("+status+")"});
-  return false;
+ if(v9Owner()!==row.owner)return false;
+ if(status==="CONFIRMED"||status==="REVIEW_SAVED"){
+  const proof=row.serverProof;
+  if(!proof||proof.requestId!==row.requestId||proof.owner!==row.owner||proof.status!==status||!proof.source)throw Error("Verified server receipt required; local payload retained.");
+  await v9Change(row.requestId,{state:status==="REVIEW_SAVED"?"SAVED_REVIEW":"SAVED",verifiedAt:new Date().toISOString(),nextCheckAt:0,lastError:status==="REVIEW_SAVED"?(proof.source+" row "+proof.row+": "+(proof.reason||"Admin correction required")):"",serverReceipt:proof});
+  reliableLastConfirmed={box:row.box,unit:row.payload.unit,machine:row.payload.machine};return true;
+ }
+ await v9Change(row.requestId,{state:status==="CLOUD_RECEIVED"?"CLOUD_RECEIVED":"PENDING",nextCheckAt:Date.now()+V9_RECHECK_MS,lastError:row.serverProof?.reason||"Durable review intake will continue with the same Request ID."});return false;
 }
 async function v9PostOnce(row){
   const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),15000);
   // Token is joined at send-time, never stored in the durable queue.
-  const payload={...row.payload,requestId:row.requestId,token:sessionToken};
+  const payload={...row.payload,action:"saveEntry",requestId:row.requestId,token:sessionToken,reviewSaveVersion:V9_REVIEW_POLICY,queueSequence:row.localSeq||0};
   try{
     await fetch(API,{method:"POST",mode:"no-cors",headers:{"Content-Type":"text/plain;charset=UTF-8"},
       body:JSON.stringify(payload),signal:controller.signal});
@@ -2407,7 +2403,7 @@ function v9ClaimFirstSend(row){
 async function v9StartImmediateHandoff(row){
   // Called only after the full local entry is committed and read back.
   // Use the existing deployed saveEntry endpoint; no undeployed cloud route.
-  try{await v9Process(row);}
+  try{v9Schedule(0);}
   catch(e){v9LastStatus="Local entry retained; cloud handoff will retry: "+String(e.message||e);}
   finally{
     v9Schedule(0);
@@ -2415,41 +2411,17 @@ async function v9StartImmediateHandoff(row){
   }
 }
 async function v9Process(row){
+ if(!sessionVerified||v9Owner()!==row.owner)return;
+ try{
+  await v9EnsureReviewPolicy();
+  // Verified policy makes full-payload same-ID intake idempotent; do not block upload on an older status poll.
   if(!sessionVerified||v9Owner()!==row.owner)return;
-  try{
-    // Request ID is the only idempotency key. Do not suppress a distinct
-    // submission because the same Box was previously recorded.
-    if(row.attempts>0){
-      const status=await v9CheckStatus(row);
-      if(await v9ApplyStatus(row,status))return;
-      row=await v9Get(row.requestId);
-      if(row.lastPostedAt && Date.now()-row.lastPostedAt<V9_RETRY_GRACE_MS)return;
-      if(row.attempts>=V9_MAX_POST_ATTEMPTS){
-        await v9Change(row.requestId,{state:"REVIEW_REQUIRED",lastError:"Retry limit reached; manual admin verification required.",nextCheckAt:0});return;
-      }
-    }
-    if(!row.attempts){
-      row=await v9ClaimFirstSend(row);
-      if(!row)return; // Another tab or the immediate handoff already claimed it.
-    }else{
-      row=await v9Change(row.requestId,{state:"SENDING",attempts:(row.attempts||0)+1,
-        lastPostedAt:Date.now(),nextCheckAt:Date.now()+V9_RETRY_GRACE_MS,lastError:"Transmission attempted. Save not yet confirmed."});
-    }
-    if(!sessionVerified||v9Owner()!==row.owner)return;
-    await v9PostOnce(row);
-    // Keep the device queue ordered. GET can complete after the POST has
-    // reached the sheet, but we never infer success from the no-cors response.
-    for(let attempt=0;attempt<2;attempt++){
-      if(!sessionVerified||v9Owner()!==row.owner)break;
-      await new Promise(resolve=>setTimeout(resolve,attempt===0?1000:1700));
-      const status=await v9CheckStatus(row);
-      if(await v9ApplyStatus(row,status))return;
-      row=await v9Get(row.requestId);
-    }
-  }catch(e){
-    await v9Change(row.requestId,{state:"PENDING",nextCheckAt:Date.now()+V9_RECHECK_MS,
-      lastError:"Verification unavailable: "+String(e.message||e).slice(0,150)});
-  }
+  row=await v9Change(row.requestId,{state:"SENDING",attempts:(row.attempts||0)+1,lastPostedAt:Date.now(),nextCheckAt:Date.now()+V9_RECHECK_MS,lastError:"Full entry is being saved; server proof pending."});
+  await v9PostOnce(row);
+  if(!sessionVerified||v9Owner()!==row.owner)return;
+  const status=await v9CheckStatus(row);if(await v9ApplyStatus(row,status))return;
+  await v9Change(row.requestId,{state:"PENDING",nextCheckAt:Date.now()+V9_RECHECK_MS,lastError:row.serverProof?.reason||"Awaiting durable Sheet receipt. Same ID retained."});
+ }catch(error){if(v9Owner()!==row.owner)return;await v9Change(row.requestId,{state:"PENDING",nextCheckAt:Date.now()+Math.min(60000,5000*Math.max(1,row.attempts||1)),lastError:String(error.message||error).slice(0,180)});}
 }
 async function v9Work(){
   if(v9WorkerBusy||!v9Db||!v9StorageReady||!sessionVerified||!currentUser)return;
@@ -2464,9 +2436,9 @@ async function v9Work(){
       const active=records.filter(v9IsActive);
       if(!active.length)break;
       // A REVIEW_REQUIRED/awaiting-check item is retained, not deleted.
-      // Other distinct box numbers may continue; same box remains blocked.
-      const first=active.find(r=>r.state!=="REVIEW_REQUIRED" && (r.nextCheckAt||0)<=Date.now());
-      if(!first)break;
+      // FIFO: do not let a newer entry overtake an unacknowledged older entry.
+      const first=active[0];
+      if(!first||(first.nextCheckAt||0)>Date.now())break;
       await v9Process(first);
       await v9RefreshUi();
       // Continue with next eligible box; idempotency stays on server Request ID.
@@ -2484,15 +2456,12 @@ async function v9CheckOnly(id){
   if(!await v9Lease()){showStatus("formStatus","Another tab is syncing. Try Check Only in a moment.","info");return}
   v9WorkerBusy=true;
   try{
-    if(await v9ResolveExistingBox(row)){
-      await v9RefreshUi();
-      showStatus("formStatus","✓ "+row.box+" already exists in PRODUCTION DATA. No duplicate sent; local audit kept.","ok");
-      return;
-    }
+    await v9EnsureReviewPolicy();
     const status=await v9CheckStatus(row);
     if(status==="NOT_FOUND" && !row.attempts){showStatus("formStatus","NOT SENT: "+row.box+" is still queued locally. No POST was sent by this check.","info")}
     await v9ApplyStatus(row,status);await v9RefreshUi();
-    if(status==="CONFIRMED")showStatus("formStatus","✓ VERIFIED SAVED: "+row.box,"ok");
+    if(status==="REVIEW_SAVED")showStatus("formStatus","✓ SAVED IN SHEET — ADMIN REVIEW: "+row.box,"info");
+    else if(status==="CONFIRMED")showStatus("formStatus","✓ VERIFIED SAVED: "+row.box,"ok");
     else if(status==="DUPLICATE_BOX")showStatus("formStatus","DUPLICATE REJECTED: "+row.box+". Attempt kept in audit.","err");
     else showStatus("formStatus","Server reports "+status+" for "+row.box+". No POST was sent by this check.","info");
   }catch(e){showStatus("formStatus","Could not verify "+row.box+": "+e.message+". Local queue kept.","err")}
@@ -2573,40 +2542,14 @@ async function saveEntry(event){
   if(!currentUser){showLogin();return}
   if(!sessionVerified){showStatus("formStatus","This session is offline/read-only. Reconnect before saving.","err");return}
   const machineText=$("machine").value||$("machineSearch").value.replace(/[^0-9]/g,"");const machine=Number(machineText);
-  if(!allowedMachines.includes(machine)){showStatus("formStatus","Select one of your assigned machines before saving.","err");return}
-  const selectedRollType=rollTypeCode($("rollType").value),allowedRollTypes=effectiveRollTypes(machine);
-  const productText=$("prodSearch").value.trim(),selectedProduct=$("selectedProduct").value.trim();
-  let productRecord=uniqueProducts().find(p=>normaliseProductKey(p.name)===normaliseProductKey(selectedProduct));
-  if(!productRecord){productRecord={name:selectedProduct,yarn:$("yarnCode").value||""}}
-  // Require the exact selected Product / variant before writing any local payload.
-  // Free text, missing [S]/[Z] variant or a changed selection is not sufficient.
-  const product=selectedProduct;
-  const validSelected=Boolean(product.trim()) &&
-    normaliseProductKey(productText)===normaliseProductKey(product) &&
-    (v12MasterMode?v12IsMasterProduct(product):isProductAssignedToMachine(product,machine));
-  if(!validSelected){
-    showStatus("formStatus","PRODUCT / VARIANT REQUIRED: select the exact Product Name including [S] or [Z] from the list. Nothing was queued.","err");
-    $("prodSearch").focus();return;
-  }
+  const selectedRollType=rollTypeCode($("rollType").value),selectedProduct=$("selectedProduct").value.trim();
+  const product=selectedProduct||$("prodSearch").value.trim(),productRecord=uniqueProducts().find(p=>normaliseProductKey(p.name)===normaliseProductKey(product))||{yarn:$("yarnCode").value||""};
   const digits=boxDigits($("box").value);
-  if(!/^\d+$/.test(String($("box").value).trim())||!digits||!Number.isSafeInteger(Number(digits))||Number(digits)<1){
-    showStatus("formStatus","पहली Entry का सही Box Number केवल अंकों में डालें (जैसे 32340)। अभी Entry Queue नहीं हुई।","err");
-    $("box").focus();return;
-  }
-  const finalBox=getBoxPrefix()+digits;
-  const rollW=round3(num($("rollType").value,.38)),rolls=num($("rollCount").value),gross=round3(num($("grossWeight").value)),tare=round3(rollW*rolls),net=round3(Math.max(0,gross-tare));
-  // Safety gate before durable local queue: reject missing/implausible weights.
-  // 100 kg is a conservative temporary per-box maximum; admin should confirm factory limit.
-  if(!selectedRollType || !Number.isFinite(rollW) || rollW<=0 || !Number.isFinite(rolls) || rolls<=0){
-    showStatus("formStatus","SELECT ROLL TYPE and enter a valid positive ROLL COUNT. No entry queued.","err");
-    $("rollCount").focus();return;
-  }
-  if(!Number.isFinite(gross) || gross<=0 || gross>100 || gross<=tare){
-    showStatus("formStatus","CHECK GROSS WEIGHT: enter a positive value above Tare and not above 100 kg per box. Example: 300 kg is NOT accepted. No entry queued.","err");
-    $("grossWeight").focus();return;
-  }
-
-  const payload={action:"saveEntry",token:sessionToken,date:$("date").value,box:finalBox,machine:String(machine),unit:unitForMachine(machine),shift:$("shift").value,productName:product,productSource:v12MasterMode?"MASTER_ADD":"PLANNING",yarnCode:productRecord.yarn||"",rollTypeCode:selectedRollType,rollType:selectedRollType ? rollW.toFixed(3) : '',rollCount:$("rollCount").value,grossW:$("grossWeight").value,tapeW:$("tareWeight").value,netW:$("netWeight").value,timestamp:new Date().toISOString()};
+  if(!/^\d+$/.test(String($("box").value).trim())||!digits||!Number.isSafeInteger(Number(digits))||Number(digits)<1){showStatus("formStatus","सही Box Number दर्ज करें।","err");$("box").focus();return;}
+  const finalBox=getBoxPrefix()+digits,netText=String($("netWeight").value||"").trim(),net=Number(netText);
+  if(!netText||!Number.isFinite(net)||net<=0){showStatus("formStatus","सही positive Net Weight दर्ज करें।","err");return;}
+  const rollW=Number($("rollType").value);
+  const payload={action:"saveEntry",token:sessionToken,date:$("date").value,box:finalBox,machine:machineText,unit:unitForMachine(machine),shift:$("shift").value,productName:product,productSource:v12MasterMode?"MASTER_ADD":"PLANNING",yarnCode:productRecord.yarn||"",rollTypeCode:selectedRollType,rollType:$("rollType").value,rollCount:$("rollCount").value,grossW:$("grossWeight").value,tapeW:$("tareWeight").value,netW:$("netWeight").value,timestamp:new Date().toISOString()};
   if (v9LocalBusy) return;
   const requestId = reliableId();
   payload.requestId = requestId;
@@ -2622,19 +2565,6 @@ async function saveEntry(event){
   v9LocalBusy=true; v9SetButton();
   try {
     if (!v9StorageReady) throw new Error("IndexedDB backup is not ready. No request sent.");
-    // Stop box duplicates on the FORM before the payload enters local queue.
-    // Same-unit cross-device uniqueness still requires a server-side atomic allocator.
-    const oldRows=await v9GetAll(v9Owner());
-    if(oldRows.some(r=>String(r.box||'').toUpperCase()===finalBox)){
-      $("box").value=Math.max(Number(digits)+1,getNextBox(unitForMachine(machine)));
-      updateBoxPreview();
-      throw new Error("BOX ALREADY USED on this phone: "+finalBox+". Next automatic box selected; check details and tap Save again.");
-    }
-    if(entries.some(r=>String(r.box||r.boxNumber||'').toUpperCase()===finalBox)){
-      $("box").value=Math.max(Number(digits)+1,getNextBox(unitForMachine(machine)));
-      updateBoxPreview();
-      throw new Error("BOX ALREADY EXISTS in loaded LIVE data: "+finalBox+". Next automatic box selected; check details and tap Save again.");
-    }
     await v9Insert(entry); // Wait for the durable transaction to finish.
     const stored = await v9Get(requestId);
     if(!stored || stored.requestId!==requestId || stored.box!==finalBox)
@@ -2642,7 +2572,7 @@ async function saveEntry(event){
     localCommitted=true;
     // Start now, before form rendering and queue refresh, without waiting
     // for old pending entries. Failure never removes the local payload.
-    void v9StartImmediateHandoff(stored);
+    void v9StartImmediateHandoff(stored); // schedule FIFO worker, never bypass earlier entries
     v9KnownBoxes.add(finalBox);
     v9PrepareNextForm(finalBox);
     showStatus("formStatus","✓ SAVED ON PHONE: "+finalBox+". Cloud upload started; receipt not yet verified. You can enter next box.","info");
