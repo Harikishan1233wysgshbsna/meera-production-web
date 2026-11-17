@@ -1379,14 +1379,24 @@ function parseMaybeJson(raw){
   return JSON.parse(t);
 }
 const API_GET_TIMEOUT_MS = 45000;
-function jsonp(url,timeoutMs=API_GET_TIMEOUT_MS){
+function jsonp(url,timeoutMs=API_GET_TIMEOUT_MS,lateHandler=null){
   return new Promise((resolve,reject)=>{
     const name="__production_jsonp_"+Date.now()+"_"+Math.random().toString(36).slice(2);
     const script=document.createElement("script");script.async=true;script.referrerPolicy="no-referrer";
-    const cleanup=()=>{delete window[name];script.remove()};
-    const timer=setTimeout(()=>{cleanup();reject(new Error("Server is taking longer than usual. Check your connection and try again."))},timeoutMs);
-    window[name]=(data)=>{clearTimeout(timer);cleanup();resolve(data)};
-    script.onerror=()=>{clearTimeout(timer);cleanup();reject(new Error("Could not connect to the server. Check your internet connection and retry."))};
+    let expired=false,hardTimer=null;
+    const cleanup=()=>{clearTimeout(timer);if(hardTimer)clearTimeout(hardTimer);delete window[name];script.remove()};
+    const timer=setTimeout(()=>{
+      expired=true;
+      if(typeof lateHandler==="function")hardTimer=setTimeout(cleanup,300000);
+      else cleanup();
+      reject(new Error("Server is taking longer than usual. Check your connection and try again."));
+    },timeoutMs);
+    window[name]=(data)=>{
+      cleanup();
+      if(expired){if(typeof lateHandler==="function")Promise.resolve().then(()=>lateHandler(data)).catch(()=>{});}
+      else resolve(data);
+    };
+    script.onerror=()=>{cleanup();if(!expired)reject(new Error("Could not connect to the server. Check your internet connection and retry."));};
     script.src=url+(url.includes("?")?"&":"?")+"callback="+encodeURIComponent(name);
     (document.head||document.body||document.documentElement).appendChild(script);
   });
@@ -2472,7 +2482,7 @@ async function v9Work(){
   }finally{
     clearInterval(heartbeat);v9WorkerBusy=false;
     await v9Release(owner);await v9RefreshUi();
-    const remaining=(await v9GetAll(owner)).filter(v9IsActive);
+    const remaining=(await v9GetAll(owner)).filter(r=>v9IsActive(r)&&r.state!=="DIRECT_UNCERTAIN");
     const delay=remaining.length?Math.max(500,Math.min(5000,(remaining[0].nextCheckAt||0)-Date.now())):12000;
     v9Schedule(delay);
   }
@@ -2489,23 +2499,30 @@ async function v9ProcessDirect(row){
   const url=buildUrl("rc5DirectSave",{token,entry:JSON.stringify(payload)});
   if(url.length>7000)throw Error("Entry exceeds direct transport size; full local copy retained for admin export.");
   // Commit attempt marker BEFORE the mutating request; restart must not blindly resend.
-  await v9Change(row.requestId,{state:"SENDING",attempts:1,directSaveAttempt:true,nextCheckAt:0,lastError:"Saving directly to Production; awaiting the same request response."});
+  const attemptId=crypto.randomUUID();
+  row=await v9Change(row.requestId,{state:"SENDING",attempts:1,directSaveAttempt:true,directAttemptId:attemptId,directResponseUntil:Date.now()+360000,nextCheckAt:0,lastError:"Saving directly to Production; awaiting the same request response."});
   if(owner!==v9Owner()||token!==sessionToken||!sessionVerified)return;
-  const result=await jsonp(url,60000);
-  if(owner!==v9Owner()||token!==sessionToken||!sessionVerified)return;
-  // Correlate the response, without any additional Sheet/status/hash query.
-  if(!result||result.ok!==true||result.mode!=="RC5_DIRECT_APPEND_V1"||result.status!=="SAVED"||result.requestId!==row.requestId||result.owner!==owner||result.source!=="PRODUCTION_DATA")throw Error(result?.error||"Save response unavailable. Admin must check Production before resend.");
-  await v9Change(row.requestId,{state:"SAVED",verifiedAt:new Date().toISOString(),nextCheckAt:0,lastError:"Saved directly in PRODUCTION DATA; administrator checks records.",serverReceipt:result});
+  const result=await jsonp(url,60000,data=>v9AcceptDirectResponse(row,data,owner,token,true));
+  await v9AcceptDirectResponse(row,result,owner,token,false);
  }catch(error){
   if(owner!==v9Owner()||token!==sessionToken)return;
-  await v9Change(row.requestId,{state:"DIRECT_UNCERTAIN",nextCheckAt:0,lastError:String(error.message||error).slice(0,180)+" No automatic resend; other entries continue."});
+  await v9Change(row.requestId,{state:"DIRECT_UNCERTAIN",nextCheckAt:0,lastError:String(error.message||error).slice(0,180)+" Late server reply can still confirm automatically. No automatic resend; other entries continue."});
  }
+}
+async function v9AcceptDirectResponse(attempt,result,owner,token,late){
+ if(owner!==v9Owner()||token!==sessionToken||!sessionVerified)return false;
+ if(!result||result.ok!==true||result.mode!=="RC5_DIRECT_APPEND_V1"||result.status!=="SAVED"||result.requestId!==attempt.requestId||result.owner!==owner||result.source!=="PRODUCTION_DATA")throw Error(result?.error||"Save response unavailable. Admin must check Production before resend.");
+ const current=await v9Get(attempt.requestId);
+ if(!current||current.owner!==owner||current.directAttemptId!==attempt.directAttemptId||!["SENDING","DIRECT_UNCERTAIN"].includes(current.state)||owner!==v9Owner()||token!==sessionToken||!sessionVerified)return false;
+ await v9Change(attempt.requestId,{state:"SAVED",verifiedAt:new Date().toISOString(),nextCheckAt:0,directResponseUntil:0,lastError:late?"Saved in PRODUCTION DATA; delayed server response received.":"Saved directly in PRODUCTION DATA; administrator checks records.",serverReceipt:result});
+ if(late){await v9RefreshUi();v9Schedule(0);}return true;
 }
 async function v9DirectManualRetry(id){
  if(v9WorkerBusy||!sessionVerified)return;
  const row=await v9Get(id);if(!row||row.owner!==v9Owner()||row.state!=="DIRECT_UNCERTAIN")return;
+ if((row.directResponseUntil||0)>Date.now()){showStatus("formStatus","Server may still be processing "+row.box+". Its late reply is still being accepted. Wait before a manual resend.","info");return;}
  if(!window.confirm("पहले Production Sheet में "+row.box+" जाँचें। पहले से save होने पर दोबारा भेजने से duplicate बनेगा। क्या फिर भी भेजना है?"))return;
- await v9Change(id,{state:"QUEUED",attempts:0,directSaveAttempt:false,nextCheckAt:0,lastError:"Admin-approved manual resend; duplicate row possible."});
+ await v9Change(id,{state:"QUEUED",attempts:0,directSaveAttempt:false,directAttemptId:null,directResponseUntil:0,nextCheckAt:0,lastError:"Admin-approved manual resend; duplicate row possible."});
  await v9RefreshUi();v9Schedule(0);
 }
 async function v9CheckOnly(id){
