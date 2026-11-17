@@ -764,7 +764,7 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
     <p class="lead">Sign in to your production workspace.</p>
     <div class="sub" style="text-align:center;margin-top:4px">MEERA TEST V10 • Safe Fast Queue</div>
 
-    <p style="font-size:12px;color:#166534;font-weight:700">LIVE Queue V1 · 17 Nov 2026 · Current version</p>
+    <p style="font-size:12px;color:#166534;font-weight:700">LIVE Queue V2 · Direct Production ready</p>
     <form id="loginForm" class="login-form">
       <div>
         <label for="loginUsername">Username or company email</label>
@@ -890,7 +890,7 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
     </div>
 <section id="v102DailyBoard" class="card v102-dash" aria-label="Today unit production dashboard"><h2>📊 Today's Unit Production <span id="v102DayTitle" class="helper"></span></h2><div class="v102-kpis"><div><strong id="v102TotalEntries">0</strong><span>Total Boxes</span></div><div><strong id="v102TotalNet">0.000</strong><span>Net Weight (kg)</span></div><div><strong id="v102TotalRolls">0</strong><span>Total Rolls</span></div><div><strong id="rc5MyDuplicateBoxes">—</strong><span>My Duplicate Boxes Today</span></div></div><div class="table-wrap"><table class="v102-table"><thead><tr><th>User</th><th>Unit</th><th>Shift</th><th>Boxes</th><th>Net kg</th><th>Rolls</th></tr></thead><tbody id="v102UserRows"><tr><td colspan="6">Loading today's production…</td></tr></tbody></table></div><p class="sub" id="v102DashboardNote">Only server-confirmed production entries are counted. Local pending queue is excluded.</p></section>
       <div class="card v9-card" id="v9QueuePanel">
-        <h2>⚡ LIVE Local Order & Fast Entry Queue <span class="helper" id="rc5QueueClientBuild">Queue V1 · 17 Nov 2026 · Current version</span></h2>
+        <h2>⚡ LIVE Local Order & Fast Entry Queue <span class="helper" id="rc5QueueClientBuild">Queue V2 · Direct Production ready</span></h2>
         <div class="v9-summary-row">
           <div><strong id="v9QueuedCount">0</strong><span>Not verified</span></div>
           <div><strong id="v9SavedCount">0</strong><span>Saved in audit</span></div>
@@ -2025,7 +2025,7 @@ function reliableId(){
   throw new Error("Secure Request ID generation not available. No data sent.");
 }
 const V9_REVIEW_POLICY="RC5_REVIEW_SAVE_V1";
-let v9PolicySession="",v9PolicyAt=0;
+let v9PolicySession="",v9PolicyAt=0,v9PolicyDirect=false;
 function v9ReviewClean(value){
  if(Array.isArray(value))return value.map(v9ReviewClean);
  if(value&&typeof value==="object"){const out=Object.create(null);Object.keys(value).sort().forEach(k=>{if(!["token","callback","payloadHash","receiptKey","queueSequence","reviewSaveVersion"].includes(k))out[k]=v9ReviewClean(value[k]);});return out;}
@@ -2038,6 +2038,7 @@ async function v9EnsureReviewPolicy(){
  const owner=v9Owner(),token=sessionToken,d=await jsonp(buildUrl("rc5SavePolicy",{token}),45000).catch(error=>{throw Error("POLICY CHECK: "+String(error.message||error));});
  if(!sessionVerified||owner!==v9Owner()||token!==sessionToken||endpoint!==(typeof API==="string"?API:""))throw Error("Account or server changed; queue retained for its owner.");
  if(!d||d.ok!==true||d.policy!==V9_REVIEW_POLICY)throw Error("Backend update required: deploy RC5_REVIEW_SAVE_V1. No review entry was resent.");
+ v9PolicyDirect=d.directSave==="RC5_DIRECT_APPEND_V1";
  v9PolicySession=policyKey;v9PolicyAt=Date.now();
 }
 let v9IdleRefreshTimer=null;
@@ -2257,7 +2258,7 @@ function v9ObserveQueuePanel(){
     check();
   }
 }
-function v9StatusLabel(state){return ({QUEUED:"Queued locally",SENDING:"Sending (not verified)",PENDING:"Pending verification",CLOUD_RECEIVED:"Received in cloud — Production pending",SAVED:"Verified saved",SAVED_REVIEW:"Saved in Sheet — admin review",DUPLICATE:"Duplicate rejected",ON_SERVER:"Already in PRODUCTION DATA",REVIEW_REQUIRED:"Admin review"})[state]||"Needs attention"}
+function v9StatusLabel(state){return ({QUEUED:"Queued locally",SENDING:"Sending (not verified)",PENDING:"Pending verification",DIRECT_UNCERTAIN:"Admin: check Production Sheet",CLOUD_RECEIVED:"Received in cloud — Production pending",SAVED:"Saved in Production",SAVED_REVIEW:"Saved in Sheet — admin review",DUPLICATE:"Duplicate rejected",ON_SERVER:"Already in PRODUCTION DATA",REVIEW_REQUIRED:"Admin review"})[state]||"Needs attention"}
 function v9StatusClass(state){return state==="SAVED_REVIEW"?"info":state==="SAVED"?"ok":state==="DUPLICATE"||state==="REVIEW_REQUIRED"?"err":"info"}
 async function v9RefreshUi(){
   if(!currentUser||!v9Db)return;
@@ -2265,7 +2266,7 @@ async function v9RefreshUi(){
   if(v9Owner()!==owner)return;
   v9KnownBoxes=new Set(rows.map(r=>r.box));
   const waiting=rows.filter(v9IsActive),verified=rows.filter(r=>r.state==="SAVED"||r.state==="SAVED_REVIEW"||r.state==="ON_SERVER").length,rejected=rows.filter(r=>r.state==="DUPLICATE").length;
-  v9LastCount=waiting.length;
+  v9LastCount=waiting.filter(r=>r.state!=="DIRECT_UNCERTAIN").length;
   $("v9QueuedCount").textContent=waiting.length;
   $("v9SavedCount").textContent=verified;
   $("v9RejectedCount").textContent=rejected;
@@ -2274,6 +2275,7 @@ async function v9RefreshUi(){
     "Admin-review entries will be durably saved to the Sheet in FIFO order; full local payload is retained.":
     waiting.length?"Pending entries sync first; automatic reports refresh afterward. Full entries remain safe on this browser. Keep this tab open.":
     "No unverified entries in this browser. The server is the authority for saved entries.";
+  if(v9PolicyDirect)status.textContent="Direct Production save: no receipt/history checks. Uncertain sends stay visible for admin; other entries continue.";
   const now=Date.now();
   v9ScheduleArchiveRefresh(rows,now);
   // The local audit is permanent; only filter what is DISPLAYED here.
@@ -2286,7 +2288,7 @@ async function v9RefreshUi(){
   const visible=unfinished.concat(recentFinal.slice(0,60));
   $("v9QueueBody").innerHTML=visible.length?visible.map(row=>{
     const suffix=String(row.requestId).slice(-8),warning=row.lastError?'<div class="v9-error">'+escapeHtml(String(row.lastError).slice(0,130))+'</div>':"";
-    const action=!V9_FINAL_STATES.has(row.state)?'<button type="button" class="v9-mini" data-v9-action="check" data-v9-id="'+escapeHtml(row.requestId)+'">Check only</button>':"";
+    const action=row.state==="DIRECT_UNCERTAIN"?'<button type="button" class="v9-mini" data-v9-action="direct-retry" data-v9-id="'+escapeHtml(row.requestId)+'">Send again (may duplicate)</button>':!V9_FINAL_STATES.has(row.state)?'<button type="button" class="v9-mini" data-v9-action="check" data-v9-id="'+escapeHtml(row.requestId)+'">Check only</button>':"";
     const resolved=V9_FINAL_STATES.has(row.state)?' data-v9-resolved="1" data-v9-id="'+escapeHtml(row.requestId)+'"':"";
     const style=v9AnimatingIds.has(row.requestId)?' class="v9-resolved-row"':"";
     return '<tr'+resolved+style+'><td>'+escapeHtml(row.box)+'</td><td>'+escapeHtml(v9StatusLabel(row.state))+warning+'</td><td>'+escapeHtml(row.createdAt.slice(11,19))+'</td><td><code>'+escapeHtml(suffix)+'</code></td><td>'+action+'</td></tr>';
@@ -2427,6 +2429,7 @@ async function v9Process(row){
  if(!sessionVerified||v9Owner()!==row.owner)return;
  try{
   await v9EnsureReviewPolicy();
+  if(typeof v9PolicyDirect!=="undefined"&&v9PolicyDirect){await v9ProcessDirect(row);return;}
   // A durable receipt already owns the full payload: poll it without uploading again.
   if(row.state==="CLOUD_RECEIVED"){
    const cloudStatus=await v9CheckStatus(row);
@@ -2456,7 +2459,7 @@ async function v9Work(){
     for(let i=0;i<30;i++){
       if(!sessionVerified||v9Owner()!==owner)break;
       const records=await v9GetAll(owner);
-      const active=records.filter(v9IsActive);
+      const active=records.filter(r=>v9IsActive(r)&&r.state!=="DIRECT_UNCERTAIN");
       if(!active.length)break;
       // A REVIEW_REQUIRED/awaiting-check item is retained, not deleted.
       // FIFO: do not let a newer entry overtake an unacknowledged older entry.
@@ -2474,15 +2477,48 @@ async function v9Work(){
     v9Schedule(delay);
   }
 }
+async function v9ProcessDirect(row){
+ const owner=v9Owner(),token=sessionToken;
+ if(!sessionVerified||owner!==row.owner)return;
+ // Existing attempted rows may already be in Production. Never silently append them again.
+ if(row.attempts||row.directSaveAttempt){
+  await v9Change(row.requestId,{state:"DIRECT_UNCERTAIN",nextCheckAt:0,lastError:"Previous send may already be saved. Admin: compare Production Sheet before choosing Send again. Other entries continue."});return;
+ }
+ try{
+  const payload={...row.payload,requestId:row.requestId};delete payload.token;
+  const url=buildUrl("rc5DirectSave",{token,entry:JSON.stringify(payload)});
+  if(url.length>7000)throw Error("Entry exceeds direct transport size; full local copy retained for admin export.");
+  // Commit attempt marker BEFORE the mutating request; restart must not blindly resend.
+  await v9Change(row.requestId,{state:"SENDING",attempts:1,directSaveAttempt:true,nextCheckAt:0,lastError:"Saving directly to Production; awaiting the same request response."});
+  if(owner!==v9Owner()||token!==sessionToken||!sessionVerified)return;
+  const result=await jsonp(url,60000);
+  if(owner!==v9Owner()||token!==sessionToken||!sessionVerified)return;
+  // Correlate the response, without any additional Sheet/status/hash query.
+  if(!result||result.ok!==true||result.mode!=="RC5_DIRECT_APPEND_V1"||result.status!=="SAVED"||result.requestId!==row.requestId||result.owner!==owner||result.source!=="PRODUCTION_DATA")throw Error(result?.error||"Save response unavailable. Admin must check Production before resend.");
+  await v9Change(row.requestId,{state:"SAVED",verifiedAt:new Date().toISOString(),nextCheckAt:0,lastError:"Saved directly in PRODUCTION DATA; administrator checks records.",serverReceipt:result});
+ }catch(error){
+  if(owner!==v9Owner()||token!==sessionToken)return;
+  await v9Change(row.requestId,{state:"DIRECT_UNCERTAIN",nextCheckAt:0,lastError:String(error.message||error).slice(0,180)+" No automatic resend; other entries continue."});
+ }
+}
+async function v9DirectManualRetry(id){
+ if(v9WorkerBusy||!sessionVerified)return;
+ const row=await v9Get(id);if(!row||row.owner!==v9Owner()||row.state!=="DIRECT_UNCERTAIN")return;
+ if(!window.confirm("पहले Production Sheet में "+row.box+" जाँचें। पहले से save होने पर दोबारा भेजने से duplicate बनेगा। क्या फिर भी भेजना है?"))return;
+ await v9Change(id,{state:"QUEUED",attempts:0,directSaveAttempt:false,nextCheckAt:0,lastError:"Admin-approved manual resend; duplicate row possible."});
+ await v9RefreshUi();v9Schedule(0);
+}
 async function v9CheckOnly(id){
   if(v9WorkerBusy){showStatus("formStatus","Queue is syncing. Wait a moment and check again.","info");return}
   if(!sessionVerified){showStatus("formStatus","Login online first. No request was sent.","err");return}
   const row=await v9Get(id);
   if(!row||row.owner!==v9Owner())return;
+  if(row.state==="DIRECT_UNCERTAIN"){showStatus("formStatus","Check Production Sheet manually before resending "+row.box+". Full local copy retained.","info");return;}
   if(!await v9Lease()){showStatus("formStatus","Another tab is syncing. Try Check Only in a moment.","info");return}
   v9WorkerBusy=true;
   try{
     await v9EnsureReviewPolicy();
+    if(v9PolicyDirect){showStatus("formStatus","Direct mode uses the save response itself. Use Sync / Check Queue to send queued entries; no separate status request is needed.","info");return;}
     const status=await v9CheckStatus(row);
     if(status==="NOT_FOUND" && !row.attempts){showStatus("formStatus","NOT SENT: "+row.box+" is still queued locally. No POST was sent by this check.","info")}
     await v9ApplyStatus(row,status);await v9RefreshUi();
@@ -2920,7 +2956,7 @@ document.addEventListener("DOMContentLoaded",async()=>{
   $("meeraRecoverSync").addEventListener("click",()=>meeraRecoverySyncAll().catch(e=>meeraRecoverySay('Sync stopped: '+e.message+'. Original backup remains safe.')));
   $("meeraRecoverExport").addEventListener("click",()=>meeraRecoveryExportReport().catch(e=>meeraRecoverySay('Report error: '+e.message)));
 
-  $("v9QueueBody").addEventListener("click",e=>{const b=e.target.closest("button[data-v9-action='check']");if(b)v9CheckOnly(b.dataset.v9Id)});
+  $("v9QueueBody").addEventListener("click",e=>{const b=e.target.closest("button[data-v9-action]");if(b){if(b.dataset.v9Action==="direct-retry")v9DirectManualRetry(b.dataset.v9Id);else v9CheckOnly(b.dataset.v9Id)}});
   window.addEventListener("online",()=>v9Schedule(150));
   // Phone OS can suspend the browser. Resume when returning; upload while closed is NOT guaranteed.
   window.addEventListener("resume",()=>{if(currentUser&&sessionVerified)v9Schedule(100)});
