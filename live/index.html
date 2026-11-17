@@ -2008,7 +2008,7 @@ const V9_DB_NAME="meera_production_test_v9_queue";
 const V9_DB_VERSION=2;
 const V9_LEGACY_PREFIX="meera_test_pending_v1_";
 const V9_FINAL_STATES=new Set(["SAVED","SAVED_REVIEW","DUPLICATE","ON_SERVER"]);
-const V9_RECHECK_MS=15000;
+const V9_RECHECK_MS=5000;
 const V9_RETRY_GRACE_MS=90000;
 const V9_MAX_POST_ATTEMPTS=3;
 let reliableLastConfirmed=null;
@@ -2427,6 +2427,12 @@ async function v9Process(row){
  if(!sessionVerified||v9Owner()!==row.owner)return;
  try{
   await v9EnsureReviewPolicy();
+  // A durable receipt already owns the full payload: poll it without uploading again.
+  if(row.state==="CLOUD_RECEIVED"){
+   const cloudStatus=await v9CheckStatus(row);
+   if(await v9ApplyStatus(row,cloudStatus))return;
+   if(cloudStatus==="CLOUD_RECEIVED")return;
+  }
   // Verified policy makes full-payload same-ID intake idempotent; do not block upload on an older status poll.
   if(!sessionVerified||v9Owner()!==row.owner)return;
   row=await v9Change(row.requestId,{state:"SENDING",attempts:(row.attempts||0)+1,lastPostedAt:Date.now(),nextCheckAt:Date.now()+V9_RECHECK_MS,lastError:"Full entry is being saved; server proof pending."});
@@ -2462,7 +2468,10 @@ async function v9Work(){
     }
   }finally{
     clearInterval(heartbeat);v9WorkerBusy=false;
-    await v9Release(owner);await v9RefreshUi();v9Schedule(12000);
+    await v9Release(owner);await v9RefreshUi();
+    const remaining=(await v9GetAll(owner)).filter(v9IsActive);
+    const delay=remaining.length?Math.max(500,Math.min(5000,(remaining[0].nextCheckAt||0)-Date.now())):12000;
+    v9Schedule(delay);
   }
 }
 async function v9CheckOnly(id){
