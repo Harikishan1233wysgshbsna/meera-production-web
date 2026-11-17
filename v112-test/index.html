@@ -2623,22 +2623,11 @@ function v102BackupViewer(archive){
 }
 async function v9Export(){
   if(!currentUser||!v9Db)return;
-  if(!crypto.subtle)throw new Error("Encrypted backup requires HTTPS or a secure browser context.");
-  // User-chosen password on export. The downloaded archive is always encrypted.
-  // Opening/importing the archive requires the operator-specified PIN.
-  const pin=prompt("Choose a backup password (at least 12 characters). Keep it safe; it cannot be recovered.");
-  if(pin===null)return;
-  if(pin.length<12){showStatus("formStatus","Use at least 12 characters for the backup password.","err");return;}
-  if(prompt("Repeat backup password")!==pin){showStatus("formStatus","Passwords do not match.","err");return;}
   const records=await v9GetAll(v9Owner());
   const entries=records.map(r=>{const c={...r,payload:{...(r.payload||{})}};delete c.payload.token;return c});
   const content={format:"MEERA_V9_LOCAL_BACKUP",version:1,owner:v9Owner(),createdAt:new Date().toISOString(),entries};
-  const salt=crypto.getRandomValues(new Uint8Array(16)),iv=crypto.getRandomValues(new Uint8Array(12));
-  const key=await v102Key(pin,salt);
-  const ciphertext=new Uint8Array(await crypto.subtle.encrypt({name:"AES-GCM",iv},key,v102Enc.encode(JSON.stringify(content))));
-  const archive={format:"MEERA_LOCKED_BACKUP_V102",version:1,salt:v102Base64(salt),iv:v102Base64(iv),ciphertext:v102Base64(ciphertext)};
-  v102Download("MEERA_LOCKED_BACKUP_"+v9Owner()+"_"+new Date().toISOString().slice(0,10)+".html",v102BackupViewer(archive),"text/html;charset=utf-8");
-  showStatus("formStatus","Encrypted backup downloaded. Use your chosen backup password to open it.","ok");
+  v102Download("MEERA_BACKUP_"+v9Owner()+"_"+new Date().toISOString().slice(0,10)+".json",JSON.stringify(content,null,2),"application/json;charset=utf-8");
+  showStatus("formStatus","Backup downloaded. No password is required to open or import this JSON file.","ok");
 }
 async function v9Import(file){
   if(!file||!currentUser||!v9Db)return;
@@ -2653,7 +2642,7 @@ async function v9Import(file){
     if(data.format==="MEERA_LOCKED_BACKUP_V102"){
       const pin=prompt("Enter backup PIN to import:");if(pin===null)return;
       data=await v102DecryptArchive(data,pin);
-    }else if(!confirm("This is a legacy UNENCRYPTED JSON backup. Import it?"))return;
+    }else if(!confirm("Import this MEERA JSON backup?"))return;
   }
   if(!data||data.format!=="MEERA_V9_LOCAL_BACKUP"||data.owner!==v9Owner()||!Array.isArray(data.entries)||data.entries.length>5000)
     throw new Error("Backup file format or account does not match logged-in user.");
