@@ -1362,7 +1362,7 @@ function showStatus(id,message,kind="info"){
 function hideStatus(id){const el=$(id);if(el){el.textContent="";el.className="status"}}
 function setSessionConnectionState(verified,message){
   sessionVerified=!!verified;
-  v9SetButton();
+  v9SetButton();v12SyncProductMode();
   if(sessionVerified)hideStatus("connectionBanner");
   else showStatus("connectionBanner",message||"Server login is being checked. Entries can save on this phone; cloud upload waits for verified login.","info");
 }
@@ -1639,11 +1639,25 @@ function uniqueProducts(){
 }
 let v12MasterMode=false;
 let v12MasterOnline=false;
+let v12MasterLoad=null;
 function v12SyncProductMode(){
  const add=document.getElementById("v12AddProduct"),back=document.getElementById("v12BackPlanning"),info=document.getElementById("v12ProductStatus");
- if(add){add.disabled=!sessionVerified||!v12MasterOnline||selectedMachineNumber()==null;add.hidden=v12MasterMode}
+ const machine=selectedMachineNumber(),loading=Boolean(v12MasterLoad&&v12MasterLoad.key===v9Owner()+"|"+sessionToken);
+ if(add){
+  add.disabled=!sessionVerified||machine==null||loading;add.hidden=v12MasterMode;
+  add.textContent=loading?"Loading Master…":v12MasterOnline?"＋ Add Production from Master":"＋ Add Production — load Master";
+  add.title=!sessionVerified?"Verify online login to load Master products":machine==null?"Select an assigned machine first":"Load Master and select an exact production product";
+ }
  if(back)back.hidden=!v12MasterMode;
- if(info)info.textContent=v12MasterMode?"MASTER LOOKUP • Choose an exact product. Planning sheet will not be modified.":"PLANNING MODE • Choose assigned product, or use + Add Production from verified Master.";
+ if(info)info.textContent=v12MasterMode?"MASTER LOOKUP • Choose an exact product. Planning sheet will not be modified.":!sessionVerified?"Master lookup needs verified online login. Existing entries can still save on this phone.":machine==null?"Select an assigned machine, then tap Add Production to load Master products.":loading?"Loading verified Master products. Keep this page open; Planning is unchanged.":v12MasterOnline?"PLANNING MODE • Choose assigned product, or use + Add Production from verified Master.":"Tap Add Production to load Master products; you do not need to wait for the pending queue to finish.";
+}
+async function v12OpenMaster(){
+ const owner=v9Owner(),token=sessionToken,machine=selectedMachineNumber();
+ if(!sessionVerified||machine==null){showStatus("formStatus",!sessionVerified?"Verify online login before loading Master products.":"पहले अपनी assigned machine चुनें। फिर Add Production दबाएँ।","info");return;}
+ if(!v12MasterOnline){const loaded=await loadMaster();if(!loaded)return;}
+ if(owner!==v9Owner()||token!==sessionToken||!sessionVerified)return;
+ if(machine!==selectedMachineNumber()){showStatus("formStatus","Machine changed while Master loaded. Tap Add Production again for the selected machine.","info");return;}
+ v12SetMasterMode(true);
 }
 function v12SetMasterMode(on){
  if(on&&(!sessionVerified||!v12MasterOnline||selectedMachineNumber()==null)){
@@ -1798,15 +1812,29 @@ function normaliseMaster(response){
   })).filter(p=>p.name);
 }
 async function loadMaster(){
+ const owner=v9Owner(),token=sessionToken,key=owner+"|"+token;
+ if(!sessionVerified||!currentUser)return false;
+ if(v12MasterLoad&&v12MasterLoad.key===key)return v12MasterLoad.promise;
+ const slot={key,promise:null};v12MasterLoad=slot;v12SyncProductMode();
+ slot.promise=(async()=>{
   try{
-    const result=await apiGet("master",{token:sessionToken});
+    const result=await apiGet("master",{token});
+    if(owner!==v9Owner()||token!==sessionToken||!sessionVerified)return false;
     if(result&&result.ok===false)throw new Error(result.error||"Master could not be loaded");
-    masterData=normaliseMaster(result);v12MasterOnline=masterData.length>0;v12SyncProductMode();writeJsonCache(MASTER_CACHE_KEY,masterData);renderFilterOptions();renderMasterTable();updateProductControl();
+    const loaded=normaliseMaster(result);if(!loaded.length)throw new Error("Master Data returned no products. Check the configured Master sheet, then tap Add Production to retry.");
+    masterData=loaded;v12MasterOnline=true;writeJsonCache(MASTER_CACHE_KEY,masterData);renderFilterOptions();renderMasterTable();updateProductControl();
     if(selectedMachineNumber()!=null)renderProductResults($("prodSearch").value);
+    return true;
   }catch(error){
-    masterData=[];v12MasterOnline=false;v12MasterMode=false;v12SyncProductMode(); renderFilterOptions();updateProductControl(); $("masterBody").innerHTML='<tr><td colspan="4" class="empty-state">Master could not be loaded. Check backend configuration.</td></tr>';
-    showStatus("formStatus",error.message||"Master loading failed.","err");
+    if(owner!==v9Owner()||token!==sessionToken||!sessionVerified)return false;
+    masterData=[];v12MasterOnline=false;v12MasterMode=false;renderFilterOptions();updateProductControl();$("masterBody").innerHTML='<tr><td colspan="4" class="empty-state">Master could not be loaded. Tap Add Production to retry.</td></tr>';
+    showStatus("formStatus",error.message||"Master loading failed. Tap Add Production to retry.","err");return false;
+  }finally{
+    if(v12MasterLoad===slot)v12MasterLoad=null;
+    if(owner===v9Owner()&&token===sessionToken)v12SyncProductMode();
   }
+ })();
+ return slot.promise;
 }
 function renderFilterOptions(){
   const products=[...new Set(masterData.map(p=>p.name))].sort((a,b)=>a.localeCompare(b));
@@ -2990,7 +3018,7 @@ document.addEventListener("DOMContentLoaded",async()=>{
     const rows=await v9GetAll(v9Owner());const match=rows.filter(r=>r.box===box);
     el.textContent=match.length?box+" found in LOCAL IndexedDB: "+match.map(r=>r.state+" / Request ID …"+String(r.requestId).slice(-8)).join("; ")+". This is local history, not a live Sheet lookup. Do not clear pending records.":box+" not in this browser's local queue. Server may still reject a duplicate; inspect the server response.";
   });
-  $("v12AddProduct").addEventListener("click",()=>v12SetMasterMode(true));$("v12BackPlanning").addEventListener("click",()=>v12SetMasterMode(false));
+  $("v12AddProduct").addEventListener("click",()=>v12OpenMaster().catch(error=>showStatus("formStatus",error.message||"Master could not be opened.","err")));$("v12BackPlanning").addEventListener("click",()=>v12SetMasterMode(false));
   $("resetButton").addEventListener("click",()=>resetForm(true));$("box").addEventListener("input",()=>{window.__boxManual=!!boxDigits($("box").value);updateBoxPreview()});$("adminBoxPrefix").addEventListener("change",()=>{$("box").value="";window.__boxManual=false;updateBoxPreview();});$("rollType").addEventListener("change",calcWeight);$("rollCount").addEventListener("input",calcWeight);$("grossWeight").addEventListener("input",calcWeight);
   $("machineSearch").addEventListener("input",filterMachineResults);$("machineSearch").addEventListener("focus",showMachineResults);$("machineSearch").addEventListener("blur",hideMachineResults);
   $("prodSearch").addEventListener("input",filterProductResults);$("prodSearch").addEventListener("focus",showProductResults);$("prodSearch").addEventListener("blur",hideProductResults);
