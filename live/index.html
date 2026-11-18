@@ -983,6 +983,7 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
               </div>
               <span id="productHint" class="sub">Select a machine first; only products assigned to that machine will be shown.</span>
               <div class="v12-product-actions"><button type="button" id="v12AddProduct" disabled>＋ Add Production from Master</button><button type="button" id="v12BackPlanning" hidden>↩ Planning products</button></div>
+              <button type="button" id="rc5PlanningRetry" style="margin-top:7px;min-height:42px;border:1px solid #2563eb;border-radius:8px;padding:8px 12px;background:#eff6ff;color:#1d4ed8;font-weight:800">↻ Refresh Planning Orders</button>
               <div id="v12ProductStatus" role="status" class="v12-note">Normal planning selection. Manual Master lookup is available after online Master verification.</div>
             </div>
             <div class="form-group">
@@ -1566,11 +1567,11 @@ function updateProductControl(){
     input.placeholder="Select a machine first...";
     if(hint)hint.textContent="Select a machine first; only products assigned to that machine will be shown.";
   }else if(!v12MasterMode&&!planningLoaded){
-    input.placeholder="Loading production planning...";
+    input.placeholder=planningLoadError?"Planning unavailable — tap Refresh Planning":"Loading production planning...";
     if(hint)hint.textContent=planningLoadError||"Loading assignments from Production Planning...";
   }else if(!masterReady){
     input.placeholder="Product master unavailable";
-    if(hint)hint.textContent="Product master is unavailable; product selection is disabled.";
+    if(hint)hint.textContent="Master Data is unavailable. Tap Add Production to retry verified Master loading.";
   }else{
     input.placeholder=v12MasterMode?"Search verified Master Data (e.g. 1811)":"Type an assigned product...";
     if(hint)hint.textContent=v12MasterMode?"Select exact [S] or [Z] Master product. Planning remains unchanged.":"Only products assigned to the selected machine are shown."
@@ -1677,7 +1678,7 @@ function renderProductResults(term=""){
   const t=String(term||"").toLowerCase().trim();
   box.innerHTML="";
   if(machine==null){box.innerHTML='<div class="empty">Select a machine first.</div>';return}
-  if(!v12MasterMode&&!planningLoaded){box.innerHTML='<div class="empty">Production planning is still loading.</div>';return}
+  if(!v12MasterMode&&!planningLoaded){box.innerHTML='<div class="empty">Planning is unavailable. Tap Refresh Planning to retry; Add Production can load verified Master products independently.</div>';return}
   const source=v12MasterMode?uniqueProducts():assignedProductList();
   const matches=source.filter(p=>!t||p.name.toLowerCase().includes(t)||(p.yarn||"").toLowerCase().includes(t));
   if(!matches.length){box.innerHTML='<div class="empty">No matching '+(v12MasterMode?'Master Data product':'assigned product')+'. Do not type an unknown product.</div>';return}
@@ -1784,7 +1785,7 @@ async function loadPlanningAssignments(){
   }catch(error){
     planningAssignments=Object.create(null);
     planningLoaded=false;
-    planningLoadError="Live Production Planning is unavailable. Product selection is disabled until the shared planning data loads.";
+    planningLoadError="Live Production Planning is unavailable. Tap Refresh Planning to retry. Add Production from Master remains available after verified login and machine selection.";
     updateProductControl();
     showStatus("formStatus",planningLoadError+" "+(error.message||""),"err");
   }
@@ -3018,7 +3019,7 @@ document.addEventListener("DOMContentLoaded",async()=>{
     const rows=await v9GetAll(v9Owner());const match=rows.filter(r=>r.box===box);
     el.textContent=match.length?box+" found in LOCAL IndexedDB: "+match.map(r=>r.state+" / Request ID …"+String(r.requestId).slice(-8)).join("; ")+". This is local history, not a live Sheet lookup. Do not clear pending records.":box+" not in this browser's local queue. Server may still reject a duplicate; inspect the server response.";
   });
-  $("v12AddProduct").addEventListener("click",()=>v12OpenMaster().catch(error=>showStatus("formStatus",error.message||"Master could not be opened.","err")));$("v12BackPlanning").addEventListener("click",()=>v12SetMasterMode(false));
+  $("v12AddProduct").addEventListener("click",()=>v12OpenMaster().catch(error=>showStatus("formStatus",error.message||"Master could not be opened.","err")));$("rc5PlanningRetry").addEventListener("click",async()=>{const b=$("rc5PlanningRetry");if(b.disabled)return;b.disabled=true;b.textContent="Refreshing planning…";try{await loadPlanningAssignments();showStatus("formStatus",planningLoaded?"Planning refreshed. Select your machine to view assigned products.":planningLoadError,planningLoaded?"ok":"err")}catch(e){showStatus("formStatus",e.message||"Planning refresh failed","err")}finally{b.disabled=false;b.textContent="↻ Refresh Planning Orders"}});$("v12BackPlanning").addEventListener("click",()=>v12SetMasterMode(false));
   $("resetButton").addEventListener("click",()=>resetForm(true));$("box").addEventListener("input",()=>{window.__boxManual=!!boxDigits($("box").value);updateBoxPreview()});$("adminBoxPrefix").addEventListener("change",()=>{$("box").value="";window.__boxManual=false;updateBoxPreview();});$("rollType").addEventListener("change",calcWeight);$("rollCount").addEventListener("input",calcWeight);$("grossWeight").addEventListener("input",calcWeight);
   $("machineSearch").addEventListener("input",filterMachineResults);$("machineSearch").addEventListener("focus",showMachineResults);$("machineSearch").addEventListener("blur",hideMachineResults);
   $("prodSearch").addEventListener("input",filterProductResults);$("prodSearch").addEventListener("focus",showProductResults);$("prodSearch").addEventListener("blur",hideProductResults);
