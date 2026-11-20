@@ -1570,8 +1570,8 @@ function updateProductControl(){
     input.placeholder=planningLoadError?"Planning unavailable — tap Refresh Planning":"Loading production planning...";
     if(hint)hint.textContent=planningLoadError||"Loading assignments from Production Planning...";
   }else if(!masterReady){
-    input.placeholder="Product master unavailable";
-    if(hint)hint.textContent="Master Data is unavailable. Tap Add Production to retry verified Master loading.";
+    input.placeholder="Search live assigned product...";
+    if(hint)hint.textContent="Live Planning loaded. Master yarn lookup is loading or unavailable; tap Add Production to retry Master loading.";
   }else{
     input.placeholder=v12MasterMode?"Search verified Master Data (e.g. 1811)":"Type an assigned product...";
     if(hint)hint.textContent=v12MasterMode?"Select exact [S] or [Z] Master product. Planning remains unchanged.":"Only products assigned to the selected machine are shown."
@@ -2088,11 +2088,17 @@ function v9HasPendingWork(){return v9WorkerBusy||v9LastCount>0;}
 function v9RefreshReportsWhenIdle(){
  if(v9IdleRefreshTimer)clearTimeout(v9IdleRefreshTimer);
  const owner=v9Owner(),token=sessionToken;
+ // RC5 LIVE: initialise read-only planning and Master before idle reporting.
+ // Pending production writes must not make Product Search inaccessible.
+ if(sessionVerified){
+  void refreshAllPlanning(true).catch(error=>console.warn("Planning read failed",error));
+  void loadMaster().catch(error=>console.warn("Master read failed",error));
+ }
  const refresh=()=>{
   v9IdleRefreshTimer=null;
   if(!sessionVerified||v9Owner()!==owner||sessionToken!==token)return;
   if(v9HasPendingWork()){v9IdleRefreshTimer=setTimeout(refresh,15000);return;}
-  loadEntries().finally(()=>{if(v9Owner()!==owner||sessionToken!==token)return;loadPlanningAssignments();loadMaster();if(isAdmin())loadUsers();});
+  loadEntries().finally(()=>{if(v9Owner()!==owner||sessionToken!==token)return;if(isAdmin())loadUsers();});
  };
  refresh();
 }
@@ -3071,7 +3077,8 @@ async function fetchMiPlanAll(){
   catch(backendError){const data=await miJsonp();if(!data||data.status!=="ok")throw backendError||new Error("invalid planning response");const pm=parseMiPlan(data);return{assign:null,plan:pm.plan,metallics:pm.metallics}}
 }
 async function refreshAllPlanning(force){
-  if(v9HasPendingWork())return; // Queue saves take priority over planning retries/focus refresh.
+  // RC5 LIVE: read-only planning must load even while local entries are pending.
+  // The FIFO production save worker and its retry logic are unchanged.
   const now=Date.now();
   if(planningFetching)return;
   if(!force&&now-planningLastFetch<45000)return;
