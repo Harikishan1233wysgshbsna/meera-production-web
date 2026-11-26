@@ -764,7 +764,7 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
     <p class="lead">Sign in to your production workspace.</p>
     <div class="sub" style="text-align:center;margin-top:4px">MEERA TEST V10 • Safe Fast Queue</div>
 
-    <p style="font-size:12px;color:#166534;font-weight:700">LIVE Queue V2 · Direct Production ready</p>
+    <p style="font-size:12px;color:#166534;font-weight:700">LIVE Queue V3 · Clear Queue fixed</p>
     <form id="loginForm" class="login-form">
       <div>
         <label for="loginUsername">Username or company email</label>
@@ -890,7 +890,7 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
     </div>
 <section id="v102DailyBoard" class="card v102-dash" aria-label="Today unit production dashboard"><h2>📊 Today's Unit Production <span id="v102DayTitle" class="helper"></span></h2><div class="v102-kpis"><div><strong id="v102TotalEntries">0</strong><span>Total Boxes</span></div><div><strong id="v102TotalNet">0.000</strong><span>Net Weight (kg)</span></div><div><strong id="v102TotalRolls">0</strong><span>Total Rolls</span></div><div><strong id="rc5MyDuplicateBoxes">—</strong><span>My Duplicate Boxes Today</span></div></div><div class="table-wrap"><table class="v102-table"><thead><tr><th>User</th><th>Unit</th><th>Shift</th><th>Boxes</th><th>Net kg</th><th>Rolls</th></tr></thead><tbody id="v102UserRows"><tr><td colspan="6">Loading today's production…</td></tr></tbody></table></div><p class="sub" id="v102DashboardNote">Only server-confirmed production entries are counted. Local pending queue is excluded.</p></section>
       <div class="card v9-card" id="v9QueuePanel">
-        <h2>⚡ LIVE Local Order & Fast Entry Queue <span class="helper" id="rc5QueueClientBuild">Queue V2 · Direct Production ready</span></h2>
+        <h2>⚡ LIVE Local Order & Fast Entry Queue <span class="helper" id="rc5QueueClientBuild">Queue V3 · Clear Queue fixed</span></h2>
         <div class="v9-summary-row">
           <div><strong id="v9QueuedCount">0</strong><span>Not verified</span></div>
           <div><strong id="v9SavedCount">0</strong><span>Saved in audit</span></div>
@@ -911,7 +911,7 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
         </div>
         <div id="meeraRecoverStatus" role="status" aria-live="polite" style="padding:10px;border:1px solid #bfcae4;border-radius:10px;margin:8px 0;white-space:pre-wrap;font-size:13px">Recovery: Log in, import your old backup, then Sync All. A verified server status is required; uploading alone is not confirmation.</div>
         <p class="v9-hint">Recovery reads your own phone backup; all statuses including SAVED / DUPLICATE are eligible. Existing Request IDs will not be inserted twice. Keep your original backup. The recovery panel uses separate IndexedDB storage and does not erase the normal queue.</p>
-        <p class="v9-hint" style="font-weight:700;color:#92400e">Old local payload clearing requires an authorized admin-assisted process and an external backup. Do not clear browser data unless all entries are confirmed in LIVE Google Sheet.</p>
+        <p class="v9-hint" style="font-weight:700;color:#92400e">Clear removes this user's local queue/audit and recovery records on this browser. Keep your backup. Already-sent requests may still finish on the server.</p>
         </div>
         <div class="table-wrap v9-queue-table"><table><thead><tr><th>Box</th><th>Status</th><th>Created (UTC)</th><th>ID end</th><th>Action</th></tr></thead>
           <tbody id="v9QueueBody"><tr><td colspan="5">Open the app and log in to view queue.</td></tr></tbody></table></div>
@@ -1380,12 +1380,13 @@ function parseMaybeJson(raw){
   return JSON.parse(t);
 }
 const API_GET_TIMEOUT_MS = 45000;
-function jsonp(url,timeoutMs=API_GET_TIMEOUT_MS,lateHandler=null){
+const v9UploadCancels=new Map();
+function jsonp(url,timeoutMs=API_GET_TIMEOUT_MS,lateHandler=null,queueOwner=null){
   return new Promise((resolve,reject)=>{
     const name="__production_jsonp_"+Date.now()+"_"+Math.random().toString(36).slice(2);
     const script=document.createElement("script");script.async=true;script.referrerPolicy="no-referrer";
     let expired=false,hardTimer=null;
-    const cleanup=()=>{clearTimeout(timer);if(hardTimer)clearTimeout(hardTimer);delete window[name];script.remove()};
+    const cleanup=()=>{clearTimeout(timer);if(hardTimer)clearTimeout(hardTimer);v9UploadCancels.delete(name);delete window[name];script.remove()};
     const timer=setTimeout(()=>{
       expired=true;
       if(typeof lateHandler==="function")hardTimer=setTimeout(cleanup,300000);
@@ -1398,20 +1399,23 @@ function jsonp(url,timeoutMs=API_GET_TIMEOUT_MS,lateHandler=null){
       else resolve(data);
     };
     script.onerror=()=>{cleanup();if(!expired)reject(new Error("Could not connect to the server. Check your internet connection and retry."));};
+    if(queueOwner)v9UploadCancels.set(name,{owner:queueOwner,cancel:()=>{cleanup();reject(Error("Local queue reset; this request will not be resent."));}});
     script.src=url+(url.includes("?")?"&":"?")+"callback="+encodeURIComponent(name);
     (document.head||document.body||document.documentElement).appendChild(script);
   });
 }
-async function apiGet(action,params={}){
+async function apiGet(action,params={},queueOwner=null){
   // Apps Script redirects cross-origin fetches; JSONP goes straight to the
   // deployed endpoint and avoids waiting for a CORS failure before retrying.
-  try{return await jsonp(buildUrl(action,params));}catch(error){throw new Error(action+": "+String(error.message||error));}
+  try{return await jsonp(buildUrl(action,params),API_GET_TIMEOUT_MS,null,queueOwner);}catch(error){throw new Error(action+": "+String(error.message||error));}
 }
-async function apiPost(payload) {
+async function apiPost(payload,queueOwner=null) {
   if (!API) throw new Error("LIVE API URL not configured. Tap LIVE API settings.");
   const body = JSON.stringify(payload);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
+  const cancelKey="post-"+Date.now()+"-"+Math.random().toString(36).slice(2);
+  if(queueOwner)v9UploadCancels.set(cancelKey,{owner:queueOwner,cancel:()=>controller.abort()});
   try {
     // A no-cors response never proves the Apps Script request was saved.
     await fetch(API, {method:"POST", mode:"no-cors",
@@ -1423,7 +1427,7 @@ async function apiPost(payload) {
       ? "POST timed out. The request MAY already be saved; verify before retrying."
       : "POST connection failed. The request MAY already be saved; verify before retrying.");
   } finally {
-    clearTimeout(timeout);
+    clearTimeout(timeout);v9UploadCancels.delete(cancelKey);
   }
 }
 async function sha256(value){
@@ -2055,6 +2059,7 @@ const V9_RETRY_GRACE_MS=90000;
 const V9_MAX_POST_ATTEMPTS=3;
 let reliableLastConfirmed=null;
 let v9Db=null, v9StorageReady=false, v9LocalBusy=false, v9WorkerBusy=false;
+let v9ClearEpoch=0,v9ClearingOwner="";
 let v9CorruptLegacy=false, v9Timer=null, v9KnownBoxes=new Set();
 let v9TabId="v9-tab-"+Date.now()+"-"+Math.random().toString(36).slice(2);
 let v9LastStatus="", v9LastCount=0;
@@ -2077,7 +2082,7 @@ async function v9ReviewHash(row){const p={...row.payload,action:"saveEntry",requ
 async function v9EnsureReviewPolicy(){
  const endpoint=typeof API==="string"?API:"",policyKey=sessionToken+"|"+endpoint;
  if(v9PolicySession===policyKey&&Date.now()-v9PolicyAt<120000)return;
- const owner=v9Owner(),token=sessionToken,d=await jsonp(buildUrl("rc5SavePolicy",{token}),45000).catch(error=>{throw Error("POLICY CHECK: "+String(error.message||error));});
+ const owner=v9Owner(),token=sessionToken,d=await jsonp(buildUrl("rc5SavePolicy",{token}),45000,null,owner).catch(error=>{throw Error("POLICY CHECK: "+String(error.message||error));});
  if(!sessionVerified||owner!==v9Owner()||token!==sessionToken||endpoint!==(typeof API==="string"?API:""))throw Error("Account or server changed; queue retained for its owner.");
  if(!d||d.ok!==true||d.policy!==V9_REVIEW_POLICY)throw Error("Backend update required: deploy RC5_REVIEW_SAVE_V1. No review entry was resent.");
  v9PolicyDirect=d.directSave==="RC5_DIRECT_APPEND_V1";
@@ -2179,10 +2184,15 @@ function v9Get(id){return v9Transaction("entries","readonly",(s,set)=>{s.get(id)
 function v9GetAll(owner){return v9Transaction("entries","readonly",(s,set)=>{
   s.index("owner").getAll(owner).onsuccess=e=>set((e.target.result||[]).sort(v9QueueOrder));
 })}
-async function v9Change(id,patch){
-  const old=await v9Get(id);if(!old)throw new Error("Queue entry disappeared; stop and check backup");
-  const updated={...old,...patch,updatedAt:new Date().toISOString()};
-  await v9Put(updated);return updated;
+async function v9Change(id,patch,epoch=v9ClearEpoch){
+ // One read/write transaction: a late callback cannot put back a deleted row.
+ return v9Transaction("entries","readwrite",(store,set)=>{
+  const req=store.get(id);req.onsuccess=()=>{
+   const old=req.result;
+   if(!old||epoch!==v9ClearEpoch||v9ClearingOwner===old.owner){set(null);return;}
+   const updated={...old,...patch,updatedAt:new Date().toISOString()};store.put(updated);set(updated);
+  };
+ });
 }
 // Durable, transaction-based cross-tab worker lease. Same-ID server dedupe
 // remains the final protection if a sleeping browser loses its lease.
@@ -2206,9 +2216,9 @@ async function v9Release(owner=v9Owner()){
 }
 function v9SetButton(){
   const b=$("saveButton");if(!b)return;
-  const available=!!currentUser && v9StorageReady && !v9LocalBusy && !v9CorruptLegacy;
+  const available=!!currentUser && v9StorageReady && !v9LocalBusy && !v9CorruptLegacy && v9ClearingOwner!==v9Owner();
   b.disabled=!available;
-  b.textContent=v9LocalBusy?"⏳ Saving local backup…":available?(sessionVerified?"⚡ Queue Entry (FAST)":"💾 Save on phone — offline"):!currentUser?"Sign in to save":!v9StorageReady?"Preparing phone storage…":"Phone storage needs attention";
+  b.textContent=v9ClearingOwner&&v9ClearingOwner===v9Owner()?"Clearing local queue…":v9LocalBusy?"⏳ Saving local backup…":available?(sessionVerified?"⚡ Queue Entry (FAST)":"💾 Save on phone — offline"):!currentUser?"Sign in to save":!v9StorageReady?"Preparing phone storage…":"Phone storage needs attention";
   b.title=available?(sessionVerified?"Save the full entry on this phone first":"Save locally now; cloud upload waits for verified login"):"Local storage must be ready before an entry can be saved.";
 }
 function reliableButton(){v9SetButton()}
@@ -2346,12 +2356,14 @@ async function v9RefreshUi(){
   if(v9QueuePanelVisible){v9AnimateVisibleResolved();}
 }
 async function v9MigrateLegacy(){
+  const epoch=v9ClearEpoch;
   const owner=v9Owner(),key=V9_LEGACY_PREFIX+owner,raw=localStorage.getItem(key);
   if(!raw)return;
   let old;
   try{old=JSON.parse(raw)}catch(e){v9CorruptLegacy=true;throw new Error("Old V4/V7 pending backup unreadable. Do NOT clear browser data.")}
   if(!old || !old.requestId || !old.payload || typeof old.payload!=="object"){v9CorruptLegacy=true;throw new Error("Old pending record invalid. Contact admin before new entries.")}
   if(await v9Get(old.requestId))return;
+  if(epoch!==v9ClearEpoch||v9ClearingOwner===owner)return;
   const clean={...old.payload};delete clean.token;
   const box=String(old.box??old.payload.box??"").trim().toUpperCase();
   try{
@@ -2370,13 +2382,14 @@ async function v9OnLogin(){
   }catch(e){v9StorageReady=false;v9SetButton();showStatus("formStatus","V9 queue unavailable: "+(e.message||"Storage error")+". No new entry can be sent.","err")}
 }
 function v9Schedule(ms=15000){
+  if(v9ClearingOwner&&v9ClearingOwner===v9Owner())return;
   if(v9Timer)clearTimeout(v9Timer);
   v9Timer=setTimeout(()=>{v9Timer=null;v9Work().catch(e=>{v9LastStatus=e.message||"Queue worker error";v9Schedule(20000)})},ms);
 }
 async function v9CheckStatus(row){
  if(!currentUser||!sessionVerified||v9Owner()!==row.owner)throw Error("Log in as the queued entry owner before verifying");
  const owner=v9Owner(),token=sessionToken,payloadHash=await v9ReviewHash(row);
- const data=await jsonp(buildUrl("checkSaveStatus",{token,requestId:row.requestId,box:row.box,netW:row.payload.netW??"",payloadHash}),60000).catch(error=>{throw Error("RECEIPT CHECK: "+String(error.message||error));});
+ const data=await jsonp(buildUrl("checkSaveStatus",{token,requestId:row.requestId,box:row.box,netW:row.payload.netW??"",payloadHash}),60000,null,owner).catch(error=>{throw Error("RECEIPT CHECK: "+String(error.message||error));});
  if(owner!==v9Owner()||token!==sessionToken)throw Error("Account changed; no queue state accepted.");
  if(!data||data.ok!==true)throw Error(data?.error||"Verification endpoint error");
  const status=String(data.status||"").toUpperCase();
@@ -2440,14 +2453,15 @@ async function v9ApplyStatus(row,status){
  await v9Change(row.requestId,{state:status==="CLOUD_RECEIVED"?"CLOUD_RECEIVED":"PENDING",nextCheckAt:Date.now()+V9_RECHECK_MS,lastError:row.serverProof?.reason||"Durable review intake will continue with the same Request ID."});return false;
 }
 async function v9PostOnce(row){
-  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),15000);
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),15000),cancelKey="queue-post-"+Date.now()+"-"+Math.random().toString(36).slice(2);
+  v9UploadCancels.set(cancelKey,{owner:row.owner,cancel:()=>controller.abort()});
   // Token is joined at send-time, never stored in the durable queue.
   const payload={...row.payload,action:"saveEntry",requestId:row.requestId,token:sessionToken,reviewSaveVersion:V9_REVIEW_POLICY,queueSequence:row.localSeq||0};
   try{
     await fetch(API,{method:"POST",mode:"no-cors",headers:{"Content-Type":"text/plain;charset=UTF-8"},
       body:JSON.stringify(payload),signal:controller.signal});
   }catch(e){ /* transport uncertainty is not a save failure */ }
-  finally{clearTimeout(timer)}
+  finally{clearTimeout(timer);v9UploadCancels.delete(cancelKey)}
 }
 function v9ClaimFirstSend(row){
   // Claim once in the same database transaction across tabs and workers.
@@ -2475,6 +2489,7 @@ async function v9StartImmediateHandoff(row){
   }
 }
 async function v9Process(row){
+ const epoch=v9ClearEpoch;if(v9ClearingOwner===row.owner)return;
  if(!sessionVerified||v9Owner()!==row.owner)return;
  try{
   await v9EnsureReviewPolicy();
@@ -2486,8 +2501,9 @@ async function v9Process(row){
    if(cloudStatus==="CLOUD_RECEIVED")return;
   }
   // Verified policy makes full-payload same-ID intake idempotent; do not block upload on an older status poll.
-  if(!sessionVerified||v9Owner()!==row.owner)return;
+  if(epoch!==v9ClearEpoch||v9ClearingOwner===row.owner||!sessionVerified||v9Owner()!==row.owner)return;
   row=await v9Change(row.requestId,{state:"SENDING",attempts:(row.attempts||0)+1,lastPostedAt:Date.now(),nextCheckAt:Date.now()+V9_RECHECK_MS,lastError:"Full entry is being saved; server proof pending."});
+  if(!row||epoch!==v9ClearEpoch||v9ClearingOwner===row.owner)return;
   const sending=v9PostOnce(row).catch(()=>{});
   if(!sessionVerified||v9Owner()!==row.owner)return;
   let status=await v9CheckStatus(row);if(await v9ApplyStatus(row,status))return;
@@ -2496,18 +2512,19 @@ async function v9Process(row){
   await sending;if(!sessionVerified||v9Owner()!==row.owner)return;
   status=await v9CheckStatus(row);if(await v9ApplyStatus(row,status))return;
   await v9Change(row.requestId,{state:"PENDING",nextCheckAt:Date.now()+V9_RECHECK_MS,lastError:row.serverProof?.reason||"Awaiting durable Sheet receipt. Same ID retained."});
- }catch(error){if(v9Owner()!==row.owner)return;await v9Change(row.requestId,{state:"PENDING",nextCheckAt:Date.now()+Math.min(60000,5000*Math.max(1,row.attempts||1)),lastError:String(error.message||error).slice(0,180)});}
+ }catch(error){if(epoch!==v9ClearEpoch||v9Owner()!==row.owner)return;await v9Change(row.requestId,{state:"PENDING",nextCheckAt:Date.now()+Math.min(60000,5000*Math.max(1,row.attempts||1)),lastError:String(error.message||error).slice(0,180)});}
 }
 async function v9Work(){
-  if(v9WorkerBusy||!v9Db||!v9StorageReady||!sessionVerified||!currentUser)return;
-  const owner=v9Owner();
+  if(v9WorkerBusy||!v9Db||!v9StorageReady||!sessionVerified||!currentUser||v9ClearingOwner===v9Owner())return;
+  const owner=v9Owner(),epoch=v9ClearEpoch;
   if(!await v9Lease()){const notice=$("v9QueueSummary");if(notice)notice.textContent="Another RC5 tab holds this queue. Close other RC5 tabs; keep this current tab open. Waiting for its lease to expire.";v9Schedule(14000);return}
   v9WorkerBusy=true;
   const heartbeat=setInterval(()=>{if(v9Owner()===owner)v9Lease(true,owner).catch(()=>{})},25000);
   try{
     for(let i=0;i<30;i++){
-      if(!sessionVerified||v9Owner()!==owner)break;
+      if(epoch!==v9ClearEpoch||v9ClearingOwner===owner||!sessionVerified||v9Owner()!==owner)break;
       const records=await v9GetAll(owner);
+      if(epoch!==v9ClearEpoch||v9ClearingOwner===owner)break;
       const active=records.filter(r=>v9IsActive(r)&&r.state!=="DIRECT_UNCERTAIN");
       if(!active.length)break;
       // A REVIEW_REQUIRED/awaiting-check item is retained, not deleted.
@@ -2527,7 +2544,8 @@ async function v9Work(){
   }
 }
 async function v9ProcessDirect(row){
- const owner=v9Owner(),token=sessionToken;
+ const owner=v9Owner(),token=sessionToken,epoch=v9ClearEpoch;
+ if(v9ClearingOwner===owner)return;
  if(!sessionVerified||owner!==row.owner)return;
  // Existing attempted rows may already be in Production. Never silently append them again.
  if(row.attempts||row.directSaveAttempt){
@@ -2540,24 +2558,25 @@ async function v9ProcessDirect(row){
   // Commit attempt marker BEFORE the mutating request; restart must not blindly resend.
   const attemptId=crypto.randomUUID();
   row=await v9Change(row.requestId,{state:"SENDING",attempts:1,directSaveAttempt:true,directAttemptId:attemptId,directResponseUntil:Date.now()+360000,nextCheckAt:0,lastError:"Saving directly to Production; awaiting the same request response."});
-  if(owner!==v9Owner()||token!==sessionToken||!sessionVerified)return;
-  const result=await jsonp(url,60000,data=>v9AcceptDirectResponse(row,data,owner,token,true));
-  await v9AcceptDirectResponse(row,result,owner,token,false);
+  if(!row||epoch!==v9ClearEpoch||v9ClearingOwner===owner||owner!==v9Owner()||token!==sessionToken||!sessionVerified)return;
+  const result=await jsonp(url,60000,data=>v9AcceptDirectResponse(row,data,owner,token,true,epoch),owner);
+  await v9AcceptDirectResponse(row,result,owner,token,false,epoch);
  }catch(error){
-  if(owner!==v9Owner()||token!==sessionToken)return;
+  if(epoch!==v9ClearEpoch||v9ClearingOwner===owner||owner!==v9Owner()||token!==sessionToken)return;
   await v9Change(row.requestId,{state:"DIRECT_UNCERTAIN",nextCheckAt:0,lastError:String(error.message||error).slice(0,180)+" Late server reply can still confirm automatically. No automatic resend; other entries continue."});
  }
 }
-async function v9AcceptDirectResponse(attempt,result,owner,token,late){
+async function v9AcceptDirectResponse(attempt,result,owner,token,late,epoch=v9ClearEpoch){
+ if(epoch!==v9ClearEpoch||v9ClearingOwner===owner)return false;
  if(owner!==v9Owner()||token!==sessionToken||!sessionVerified)return false;
  if(!result||result.ok!==true||result.mode!=="RC5_DIRECT_APPEND_V1"||result.status!=="SAVED"||result.requestId!==attempt.requestId||result.owner!==owner||result.source!=="PRODUCTION_DATA")throw Error(result?.error||"Save response unavailable. Admin must check Production before resend.");
  const current=await v9Get(attempt.requestId);
- if(!current||current.owner!==owner||current.directAttemptId!==attempt.directAttemptId||!["SENDING","DIRECT_UNCERTAIN"].includes(current.state)||owner!==v9Owner()||token!==sessionToken||!sessionVerified)return false;
- await v9Change(attempt.requestId,{state:"SAVED",verifiedAt:new Date().toISOString(),nextCheckAt:0,directResponseUntil:0,lastError:late?"Saved in PRODUCTION DATA; delayed server response received.":"Saved directly in PRODUCTION DATA; administrator checks records.",serverReceipt:result});
+ if(epoch!==v9ClearEpoch||v9ClearingOwner===owner||!current||current.owner!==owner||current.directAttemptId!==attempt.directAttemptId||!["SENDING","DIRECT_UNCERTAIN"].includes(current.state)||owner!==v9Owner()||token!==sessionToken||!sessionVerified)return false;
+ await v9Change(attempt.requestId,{state:"SAVED",verifiedAt:new Date().toISOString(),nextCheckAt:0,directResponseUntil:0,lastError:late?"Saved in PRODUCTION DATA; delayed server response received.":"Saved directly in PRODUCTION DATA; administrator checks records.",serverReceipt:result},epoch);
  if(late){await v9RefreshUi();v9Schedule(0);}return true;
 }
 async function v9DirectManualRetry(id){
- if(v9WorkerBusy||!sessionVerified)return;
+ if(v9WorkerBusy||!sessionVerified||v9ClearingOwner===v9Owner())return;
  const row=await v9Get(id);if(!row||row.owner!==v9Owner()||row.state!=="DIRECT_UNCERTAIN")return;
  if((row.directResponseUntil||0)>Date.now()){showStatus("formStatus","Server may still be processing "+row.box+". Its late reply is still being accepted. Wait before a manual resend.","info");return;}
  if(!window.confirm("पहले Production Sheet में "+row.box+" जाँचें। पहले से save होने पर दोबारा भेजने से duplicate बनेगा। क्या फिर भी भेजना है?"))return;
@@ -2620,6 +2639,7 @@ async function v9Export(){
   showStatus("formStatus","Protected backup downloaded without a password prompt. Enter PIN 8812 when opening the file.","ok");
 }
 async function v9Import(file){
+  const epoch=v9ClearEpoch;
   if(!file||!currentUser||!v9Db)return;
   let data;const raw=await file.text();
   if(/\.html?$/i.test(file.name)){
@@ -2643,7 +2663,9 @@ async function v9Import(file){
   }
   let count=0;
   for(const row of data.entries){
+    if(epoch!==v9ClearEpoch||v9ClearingOwner===v9Owner())throw Error("Backup import stopped by queue reset.");
     if(await v9Get(row.requestId))continue;
+    if(epoch!==v9ClearEpoch||v9ClearingOwner===v9Owner())throw Error("Backup import stopped by queue reset.");
     const safe={...row,payload:{...row.payload}};delete safe.payload.token;
     if(!V9_FINAL_STATES.has(safe.state)){safe.state="PENDING";safe.nextCheckAt=0;}
     await v9Insert(safe);count++;
@@ -2653,6 +2675,7 @@ async function v9Import(file){
 }
 async function saveEntry(event){
   event.preventDefault();
+  if(v9ClearingOwner===v9Owner()){showStatus("formStatus","Local queue reset is running. Wait for Remaining: 0 before a new entry.","info");return;}
   if(v9LocalBusy){
     showStatus("formStatus","Local backup write in progress. Please wait.","info");
     return;
@@ -2805,7 +2828,7 @@ async function meeraRecoveryTx(mode,operation){
   });
 }
 const meeraRecoveryAll=()=>meeraRecoveryTx('readonly',(s,set)=>{s.getAll().onsuccess=e=>set(e.target.result||[])});
-const meeraRecoveryPut=row=>meeraRecoveryTx('readwrite',(s)=>s.put(row));
+const meeraRecoveryPut=(row,epoch=v9ClearEpoch)=>meeraRecoveryTx('readwrite',(s)=>{if(epoch!==v9ClearEpoch||v9ClearingOwner===row.owner)throw Error('Local recovery stopped by queue reset');s.put(row)});
 function meeraRecoverySay(msg){const el=document.getElementById('meeraRecoverStatus');if(el)el.textContent=msg}
 function meeraRecoveryAssertLogin(){if(!currentUser||!sessionToken||!sessionVerified)throw Error('Log in ONLINE before recovery');if(!window.indexedDB)throw Error('IndexedDB is unavailable on this browser')}
 function meeraRecoveryEntry(input){
@@ -2840,36 +2863,38 @@ async function meeraRecoveryReadArchive(file){
   return data.entries;
 }
 async function meeraRecoveryImport(file){
-  meeraRecoveryAssertLogin();if(meeraRecoveryBusy)throw Error('Recovery is already running');
+  meeraRecoveryAssertLogin();if(meeraRecoveryBusy||v9ClearingOwner===v9Owner())throw Error('Recovery is already running or queue reset is active');
+  const epoch=v9ClearEpoch;
   const entries=await meeraRecoveryReadArchive(file);if(!entries)return;
   const validated=entries.map(meeraRecoveryEntry); // validate entire file first
   const old=await meeraRecoveryAll(),byKey=new Map(old.map(r=>[r.key,r]));
   let added=0;
   for(const item of validated){
     if(byKey.has(item.key))continue;
-    await meeraRecoveryPut(item);byKey.set(item.key,item);added++;
+    await meeraRecoveryPut(item,epoch);byKey.set(item.key,item);added++;
   }
   meeraRecoverySay('Imported '+added+' NEW records / '+entries.length+' in this backup. Stored on this browser separately from normal queue. Press Sync All while online.');
 }
 async function meeraRecoveryCombineLocal(){
+  const epoch=v9ClearEpoch;
   const history=await v9GetAll(v9Owner()),existing=await meeraRecoveryAll();
   const keys=new Set(existing.map(r=>r.key));let count=0;
   for(const source of history){
     let row;
     try{row=meeraRecoveryEntry(source)}catch(e){continue} // corrupt legacy records stay untouched in original queue
     if(keys.has(row.key))continue;
-    await meeraRecoveryPut(row);keys.add(row.key);count++;
+    await meeraRecoveryPut(row,epoch);keys.add(row.key);count++;
   }
   return count;
 }
 async function meeraRecoveryStatus(ids){
   if(!ids.length)return [];
   // One authenticated JSONP GET for up to 25 Request IDs, not 25 individual GETs.
-  const res=await apiGet('bulkRecoveryStatus',{token:sessionToken,ids:ids.join(',')});
+  const res=await apiGet('bulkRecoveryStatus',{token:sessionToken,ids:ids.join(',')},v9Owner());
   if(!res||!res.ok||!Array.isArray(res.results))throw Error(res&&res.error||'Bulk status API missing; Backend GET route must be deployed');
   return res.results;
 }
-async function meeraRecoveryVerifyBatch(batch,waitForPost=false){
+async function meeraRecoveryVerifyBatch(batch,waitForPost=false,epoch=v9ClearEpoch){
   const found=new Map();
   for(let attempt=0;attempt<(waitForPost?2:1);attempt++){
     const statuses=await meeraRecoveryStatus(batch.map(r=>r.requestId));
@@ -2886,14 +2911,15 @@ async function meeraRecoveryVerifyBatch(batch,waitForPost=false){
     const updated={...row,verification:verified?'CONFIRMED':String(result.status||'UNVERIFIED'),
       lastError:verified?'':(!match&&result.box?'Box mismatch: '+result.box:(result.error||'Not fully confirmed; do not erase backup')),
       checkedAt:new Date().toISOString()};
-    await meeraRecoveryPut(updated);
+    await meeraRecoveryPut(updated,epoch);
     if(verified)confirmed++;else unverified++;
   }
   return {confirmed,unverified};
 }
 async function meeraRecoverySyncAll(){
   meeraRecoveryAssertLogin();
-  if(meeraRecoveryBusy)throw Error('Recovery already running');
+  if(meeraRecoveryBusy||v9ClearingOwner===v9Owner())throw Error('Recovery already running or queue reset is active');
+  const epoch=v9ClearEpoch,owner=v9Owner();
   meeraRecoveryBusy=true;
   const button=document.getElementById('meeraRecoverSync');if(button)button.disabled=true;
   try{
@@ -2905,24 +2931,26 @@ async function meeraRecoverySyncAll(){
     const started=performance.now();
     meeraRecoverySay('Found '+all.length+' entries; '+confirmed+' previously confirmed; '+pending.length+' to check. Added '+added+' records from this browser queue.');
     for(let index=0;index<pending.length;index+=25){
+      if(epoch!==v9ClearEpoch||v9ClearingOwner===owner||v9Owner()!==owner)throw Error('Recovery stopped by local queue reset/account change');
       const batch=pending.slice(index,index+25);
       // Check before POST to avoid resending recovered entries.
-      const first=await meeraRecoveryVerifyBatch(batch);
+      const first=await meeraRecoveryVerifyBatch(batch,false,epoch);
       confirmed+=first.confirmed;
       const remaining=[];
       for(const r of batch){const x=(await meeraRecoveryTx('readonly',(s,set)=>{s.get(r.key).onsuccess=e=>set(e.target.result)}));if(x.verification==='NOT_FOUND')remaining.push(r)}
+      if(epoch!==v9ClearEpoch||v9ClearingOwner===owner||v9Owner()!==owner)throw Error('Recovery stopped by local queue reset/account change');
       if(remaining.length){
         meeraRecoverySay('Uploading batch '+(Math.floor(index/25)+1)+' of '+Math.ceil(pending.length/25)+' ('+remaining.length+' entries)…');
         // No blocking verification polls after upload. A no-cors POST is NOT a save confirmation.
         // Preserve each original payload and request ID in durable recovery storage.
         let transportError='';
-        try{await apiPost({action:'bulkSyncOldEntries',token:sessionToken,entries:remaining.map(r=>({owner:r.owner,requestId:r.requestId,box:r.box,state:r.state,payload:r.payload}))})}
+        try{await apiPost({action:'bulkSyncOldEntries',token:sessionToken,entries:remaining.map(r=>({owner:r.owner,requestId:r.requestId,box:r.box,state:r.state,payload:r.payload}))},owner)}
         catch(err){transportError=String(err&&err.message||err)}
         const sentAt=new Date().toISOString();
         for(const r of remaining){
           await meeraRecoveryPut({...r,verification:'AWAITING_CONFIRMATION',
             lastError:transportError||'Upload attempted; server confirmation will be checked on next Sync All. Keep original backup.',
-            checkedAt:sentAt});
+            checkedAt:sentAt},epoch);
         }
         if(transportError)meeraRecoverySay('Upload uncertain: '+transportError+'. Original records retained for later verification.');
       }
@@ -2934,7 +2962,7 @@ async function meeraRecoverySyncAll(){
     const count=final.filter(r=>r.verification==='CONFIRMED').length;
     unverified=final.length-count;
     meeraRecoverySay('Recovery finished checking '+final.length+' entries. VERIFIED IN BOTH SHEETS: '+count+'. Needs review / unconfirmed: '+unverified+'. Do NOT erase the original backup. Export Recovery Report for the details.');
-  }finally{meeraRecoveryBusy=false;if(button)button.disabled=false}
+  }catch(error){if(epoch!==v9ClearEpoch)return;throw error;}finally{meeraRecoveryBusy=false;if(button)button.disabled=false}
 }
 async function meeraRecoveryExportReport(){
   meeraRecoveryAssertLogin();
@@ -2947,49 +2975,43 @@ async function meeraRecoveryExportReport(){
 // Clears only the currently logged-in owner's browser records, NOT LIVE sheets.
 // The operator must first export and preserve a separate backup.
 async function meeraClearOldLocalData(chatConfirmedOwner=null){
-  meeraRecoveryAssertLogin();
-  if(v9WorkerBusy||v9LocalBusy||meeraRecoveryBusy)throw Error('Sync or entry save is running. Try again when it stops.');
-  if(!v9Db||!v9StorageReady)throw Error('Local queue storage is not ready.');
-  const owner=v9Owner();
-  if(chatConfirmedOwner!==owner){
-    if(!confirm('PERMANENT LOCAL CLEAR for '+owner+' on THIS browser only. Your old entries may still be missing from LIVE. Confirm you have exported the backup to a different device. Continue?'))return 'Clear cancelled. No local entries deleted.';
-    const typed=prompt('To clear old browser records, type exactly: CLEAR '+owner);
-    if(typed!=='CLEAR '+owner){meeraRecoverySay('Clear cancelled. No records deleted.');return 'Clear cancelled. No local entries deleted.';}
-  }
-  if(!await v9Lease(false,owner))throw Error('Another browser tab is syncing. Close other tabs first.');
-  v9WorkerBusy=true;
-  const btn=document.getElementById('v9ClearOldLocal');
-  if(btn)btn.disabled=true;
-  let queueDeleted=0,recoveryDeleted=0;
-  try{
-    if(v9Owner()!==owner)throw Error('User changed during clear; cancelled.');
-    // Delete this user only; other users' entries are untouched.
-    await v9Transaction('entries','readwrite',(store)=>{
-      const req=store.index('owner').getAllKeys(owner);
-      req.onsuccess=()=>{const keys=req.result||[];queueDeleted=keys.length;keys.forEach(k=>store.delete(k))};
-    });
-    const recovery=await meeraRecoveryAll();
-    const own=recovery.filter(r=>r.owner===owner);
-    await meeraRecoveryTx('readwrite',(store)=>{for(const r of own)store.delete(r.key)});
-    recoveryDeleted=own.length;
-    // This old localStorage payload otherwise gets migrated BACK into the queue on next login.
-    localStorage.removeItem(V9_LEGACY_PREFIX+owner);
-    await v9Transaction('meta','readwrite',(store)=>{store.delete('nextseq:'+owner)});
-    v9KnownBoxes=new Set();
-    await v9RefreshUi();
-    const qLeft=(await v9GetAll(owner)).length;
-    const rLeft=(await meeraRecoveryAll()).filter(r=>r.owner===owner).length;
-    if(qLeft||rLeft)throw Error('Clear verification failed: '+qLeft+' queue and '+rLeft+' recovery entries remain. Retry after closing other tabs.');
-    const message='✅ OLD LOCAL PAYLOAD CLEARED for '+owner+': '+queueDeleted+' queue records + '+recoveryDeleted+' recovery records removed. Remaining: 0. LIVE Sheet and saved off-phone backup unchanged. New entries can start.';
-    meeraRecoverySay(message);
-    showStatus('formStatus',message,'ok');
-    return message;
-  }finally{
-    v9WorkerBusy=false;
-    if(btn)btn.disabled=false;
-    await v9Release(owner);
-    v9Schedule(12000);
-  }
+ if(!currentUser||!v9Owner())throw Error('Open the account whose local queue you want to clear.');
+ if(v9LocalBusy)throw Error('A new entry is being committed locally. Wait a moment and press Clear again.');
+ if(v9ClearingOwner)throw Error('Local queue clear is already running.');
+ const owner=v9Owner();
+ if(chatConfirmedOwner!==null&&chatConfirmedOwner!==owner)throw Error('Logged-in user changed. No data deleted.');
+ await v9Open();await meeraRecoveryDb();
+ if(v9Owner()!==owner)throw Error('Logged-in user changed. No data deleted.');
+ const initial=await v9GetAll(owner),initialRecovery=(await meeraRecoveryAll()).filter(r=>r.owner===owner);
+ if(chatConfirmedOwner!==owner&&!confirm('Backup ले लिया है? '+owner+' की इस browser की '+initial.length+' local queue/audit और '+initialRecovery.length+' recovery entries DELETE होंगी। दूसरे users और LIVE Sheet नहीं हटेंगे। पहले भेजी server request फिर भी पूरी हो सकती है। Clear करें?'))return 'Clear cancelled. No local entries deleted.';
+ if(v9Owner()!==owner)throw Error('Logged-in user changed. No data deleted.');
+ if(!await v9Lease(false,owner))throw Error('Another RC5 tab is syncing this user. Close other RC5 tabs and press Clear again.');
+ v9ClearingOwner=owner;v9ClearEpoch++;
+ meeraRecoverySay('Clearing backed-up local records for '+owner+'…');showStatus('formStatus','Clearing local queue for '+owner+'…','info');
+ if(v9Timer){clearTimeout(v9Timer);v9Timer=null;}
+ const button=document.getElementById('v9ClearOldLocal');if(button){button.disabled=true;button.textContent='Clearing local queue…';}v9SetButton();
+ for(const call of [...v9UploadCancels.values()])if(call.owner===owner)call.cancel();
+ let queueDeleted=0,recoveryDeleted=0;
+ try{
+  if(v9Owner()!==owner)throw Error('User changed; clear cancelled.');
+  // All recovery callbacks from the previous generation are now blocked.
+  await meeraRecoveryTx('readwrite',store=>{const req=store.getAll();req.onsuccess=()=>{for(const row of req.result||[])if(row.owner===owner){store.delete(row.key);recoveryDeleted++;}};});
+  await v9Transaction('entries','readwrite',store=>{const req=store.index('owner').getAllKeys(owner);req.onsuccess=()=>{for(const key of req.result||[]){store.delete(key);queueDeleted++;}};});
+  localStorage.removeItem(V9_LEGACY_PREFIX+owner);
+  await v9Transaction('meta','readwrite',store=>{store.delete('nextseq:'+owner);});
+  v9KnownBoxes=new Set();
+  const qLeft=(await v9GetAll(owner)).length,rLeft=(await meeraRecoveryAll()).filter(r=>r.owner===owner).length;
+  if(qLeft||rLeft)throw Error('Clear incomplete: '+qLeft+' queue and '+rLeft+' recovery remain. Preserve backup and press Clear again.');
+  v9CorruptLegacy=false;v9StorageReady=true;
+  await v9RefreshUi();
+  const message='✅ '+owner+': '+queueDeleted+' local queue/audit + '+recoveryDeleted+' recovery records deleted. Remaining: 0. Backup और LIVE Sheet नहीं बदले। नई entry भर सकते हैं।';
+  meeraRecoverySay(message);showStatus('formStatus',message,'ok');return message;
+ }catch(error){
+  await v9RefreshUi().catch(()=>{});throw error;
+ }finally{
+  v9ClearingOwner='';if(button){button.disabled=false;button.textContent='🧹 CLEAR OLD PAYLOAD / START FRESH';}
+  await v9Release(owner);v9SetButton();v9Schedule(100);
+ }
 }
 /* ===== End separate recovery module ===== */
 
