@@ -1246,7 +1246,7 @@ let WEB_APP_URL = API;
 window.meeraApplyLiveApi = function(url){ API=url; WEB_APP_URL=url; window.meeraActiveLiveExec=url; };
 // Restore the operator's previously saved LIVE server endpoint on every page load.
 try{const u=localStorage.getItem("meera_live_exec_url_v103");if(u){
- const p=new URL(u);if(p.protocol==="https:"&&p.hostname==="script.google.com"&&p.pathname.startsWith("/macros/s/")&&p.pathname.endsWith("/exec"))window.meeraApplyLiveApi(u);
+ const p=new URL(u);if(p.protocol==="https:"&&p.hostname==="script.google.com"&&p.pathname.startsWith("/macros/s/")&&p.pathname.endsWith("/exec")&&u===API)window.meeraApplyLiveApi(u);
 }}catch(_){/* Keep pinned LIVE endpoint. */}
 const ENTRY_SHEET = "1yIUv0HnXysigxZ9R45cTQWk-46NW2PyaFmeaX7VSh8E";
 const ENTRY_GID = "1166271357";
