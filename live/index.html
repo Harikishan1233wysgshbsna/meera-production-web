@@ -1243,7 +1243,11 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
 let API = "https://script.google.com/macros/s/AKfycbw5vVPy6aoLR-s4pru2TWuoeS9iiB4GXx97vpDeFIyAdWsra8J4fCRHdo84EL0ctYEk1Q/exec";
 // Live Planning is served by the backend to avoid browser/CSP blocks on Google Sheets JSONP.
 let WEB_APP_URL = API;
-window.meeraApplyLiveApi = function(url){ API=url; WEB_APP_URL=url; };
+window.meeraApplyLiveApi = function(url){ API=url; WEB_APP_URL=url; window.meeraActiveLiveExec=url; };
+// Restore the operator's previously saved LIVE server endpoint on every page load.
+try{const u=localStorage.getItem("meera_live_exec_url_v103");if(u){
+ const p=new URL(u);if(p.protocol==="https:"&&p.hostname==="script.google.com"&&p.pathname.startsWith("/macros/s/")&&p.pathname.endsWith("/exec"))window.meeraApplyLiveApi(u);
+}}catch(_){/* Keep pinned LIVE endpoint. */}
 const ENTRY_SHEET = "1yIUv0HnXysigxZ9R45cTQWk-46NW2PyaFmeaX7VSh8E";
 const ENTRY_GID = "1166271357";
 const PLANNING_SHEET_ID = "1Zk_8vvbuGGeA6teAKykPDT80eg9Em99byOakBlBVMEE";
@@ -1654,7 +1658,7 @@ function v12SyncProductMode(){
   add.title=!sessionVerified?"Verify online login to load Master products":machine==null?"Select an assigned machine first":"Load Master and select an exact production product";
  }
  if(back)back.hidden=!v12MasterMode;
- if(info)info.textContent=v12MasterMode?"MASTER LOOKUP • Choose an exact product. Planning sheet will not be modified.":!sessionVerified?"Master lookup needs verified online login. Existing entries can still save on this phone.":machine==null?"Select an assigned machine, then tap Add Production to load Master products.":loading?"Loading verified Master products. Keep this page open; Planning is unchanged.":v12MasterOnline?"PLANNING MODE • Choose assigned product, or use + Add Production from verified Master.":"Tap Add Production to load Master products; you do not need to wait for the pending queue to finish.";
+ if(info)info.textContent=v12MasterMode?"MASTER LOOKUP • Choose an exact product. Source: "+(window.meeraMasterSource||"Master")+". Planning unchanged.":!sessionVerified?"Master lookup needs verified online login. Existing entries can still save on this phone.":machine==null?"Select an assigned machine, then tap Add Production to load Master products.":loading?"Loading verified Master products. Keep this page open; Planning is unchanged.":v12MasterOnline?"PLANNING MODE • Choose assigned product, or use + Add Production from verified Master.":"Tap Add Production to load Master products; you do not need to wait for the pending queue to finish.";
 }
 async function v12OpenMaster(){
  const owner=v9Owner(),token=sessionToken,machine=selectedMachineNumber();
@@ -1810,11 +1814,37 @@ function loadCachedData(){
 
 /* -------- Master data -------- */
 function normaliseMaster(response){
-  const raw=Array.isArray(response)?response:(response&&Array.isArray(response.data)?response.data:[]);
-  return raw.map(p=>({
-    name:text(p&&((p.name!==undefined?p.name:(p.product!==undefined?p.product:p[0])))),
-    yarn:text(p&&((p.yarn!==undefined?p.yarn:p[1])))
-  })).filter(p=>p.name);
+ const x=response&&response.result&&typeof response.result==="object"?response.result:response;
+ const raw=Array.isArray(x)?x:(x&&["data","products","masterData","rows","items"].map(k=>x[k]).find(Array.isArray))||[];
+ const seen=new Set();
+ return raw.map(p=>({name:text(p&&(p.name??p.productName??p.product??p.shadeName??p[0])),yarn:text(p&&(p.yarn??p.yarnCode??p.yarn_code??p[1]))})).filter(p=>{
+  const k=normaliseProductKey(p.name);
+  if(!k||["product name","shade name","name"].includes(k)||seen.has(k))return false;
+  seen.add(k);return true;
+ });
+}
+// Read-only verified fallback: Data sheet / Master Sheet C=Product Name, I=Yarn.
+function v12LoadMasterFromSheet(){
+ return new Promise((resolve,reject)=>{
+  const cb="__meera_master_"+Date.now()+"_"+Math.random().toString(36).slice(2);
+  const script=document.createElement("script");script.async=true;script.referrerPolicy="no-referrer";
+  let done=false;
+  const finish=(err,data)=>{if(done)return;done=true;clearTimeout(timer);delete window[cb];script.remove();if(err)reject(err);else resolve(data)};
+  const timer=setTimeout(()=>finish(Error("Google Master request timed out")),18000);
+  window[cb]=response=>{
+   try{
+    if(!response||response.status==="error"||!response.table||!Array.isArray(response.table.rows))throw Error("Master Sheet inaccessible or malformed");
+    const rows=response.table.rows.map(row=>({name:row.c?.[0]?.v??"",yarn:row.c?.[1]?.v??""}));
+    const data=normaliseMaster(rows);
+    if(!data.length)throw Error("No valid Master products from columns C and I");
+    finish(null,{data,source:"Data sheet / Master Sheet"});
+   }catch(err){finish(err);}
+  };
+  script.onerror=()=>finish(Error("Google Master Sheet access denied; check operator Google account permissions"));
+  const params=new URLSearchParams({sheet:"Master Sheet",tq:"select C, I where C is not null",tqx:"responseHandler:"+cb});
+  script.src="https://docs.google.com/spreadsheets/d/1zYwq_HRmykcize2ZTBOiK-uBgq_yvta14ksMiKs1wi8/gviz/tq?"+params.toString();
+  (document.head||document.body||document.documentElement).appendChild(script);
+ });
 }
 async function loadMaster(){
  const owner=v9Owner(),token=sessionToken,key=owner+"|"+token;
@@ -1823,10 +1853,23 @@ async function loadMaster(){
  const slot={key,promise:null};v12MasterLoad=slot;v12SyncProductMode();
  slot.promise=(async()=>{
   try{
-    const result=await apiGet("master",{token});
+    const backend=async()=>{
+     const response=await apiGet("master",{token});
+     if(response&&response.ok===false)throw Error(response.error||"Master backend access denied");
+     const data=normaliseMaster(response);
+     if(!data.length)throw Error("Backend Master returned no products");
+     return {data,source:"LIVE Apps Script Master"};
+    };
+    // Race two read-only verified sources. Do not block the operator indefinitely.
+    let timer;
+    const outcome=await Promise.race([
+     Promise.any([backend(),v12LoadMasterFromSheet()]),
+     new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error("Master timed out (22s). Check LIVE URL and Master access; retry.")),22000)})
+    ]).finally(()=>clearTimeout(timer));
     if(owner!==v9Owner()||token!==sessionToken||!sessionVerified)return false;
-    if(result&&result.ok===false)throw new Error(result.error||"Master could not be loaded");
-    const loaded=normaliseMaster(result);if(!loaded.length)throw new Error("Master Data returned no products. Check the configured Master sheet, then tap Add Production to retry.");
+    const loaded=outcome.data;
+    if(!loaded||!loaded.length)throw Error("Master has no usable products");
+    window.meeraMasterSource=outcome.source;
     masterData=loaded;v12MasterOnline=true;writeJsonCache(MASTER_CACHE_KEY,masterData);renderFilterOptions();renderMasterTable();updateProductControl();
     if(selectedMachineNumber()!=null)renderProductResults($("prodSearch").value);
     return true;
@@ -2974,7 +3017,21 @@ async function meeraRecoveryExportReport(){
 }
 // Clears only the currently logged-in owner's browser records, NOT LIVE sheets.
 // The operator must first export and preserve a separate backup.
+// UI deterrent only: real administrator authorization requires a private backend.
+const MEERA_CLEAR_PIN_DIGEST="4e504ed0311b8b6e5e65f5cd865dee6fed26456bd98912bc1a9dd7afb0878800";
+let meeraClearPinFailures=0;
+async function meeraClearPinCheck(){
+ if(meeraClearPinFailures>=5)throw Error("Too many incorrect PIN attempts. Reload and contact admin.");
+ if(!window.crypto||!crypto.subtle)throw Error("Secure browser required for local queue protection.");
+ const pin=window.prompt("ADMIN ONLY: Enter Clear Queue PIN before deleting local entries.");
+ if(pin===null)return false;
+ const bytes=new TextEncoder().encode(pin.trim());
+ const digest=Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",bytes))).map(b=>b.toString(16).padStart(2,"0")).join("");
+ if(digest!==MEERA_CLEAR_PIN_DIGEST){meeraClearPinFailures++;throw Error("Incorrect admin PIN. Nothing was deleted.");}
+ meeraClearPinFailures=0;return true;
+}
 async function meeraClearOldLocalData(chatConfirmedOwner=null){
+ if(!await meeraClearPinCheck())return 'Clear cancelled. No data deleted.';
  if(!currentUser||!v9Owner())throw Error('Open the account whose local queue you want to clear.');
  if(v9LocalBusy)throw Error('A new entry is being committed locally. Wait a moment and press Clear again.');
  if(v9ClearingOwner)throw Error('Local queue clear is already running.');
@@ -3025,7 +3082,7 @@ document.addEventListener("DOMContentLoaded",async()=>{
   $("entryForm").addEventListener("submit",event=>saveEntry(event).catch(error=>showStatus("formStatus","Save could not finish: "+(error.message||"Unexpected error")+". Keep the form and check the local queue before entering it again.","err")));v9SetButton();v9ObserveQueuePanel();
   $("v9SyncNow").addEventListener("click",()=>v9Schedule(20));
   $("v9Export").addEventListener("click",()=>v9Export().catch(e=>showStatus("formStatus",e.message,"err")));
-  $("v9ClearOldLocal").addEventListener("click",()=>meeraClearOldLocalData().catch(e=>meeraRecoverySay('Clear not completed: '+e.message+'. Preserve your downloaded backup.')));
+  $("v9ClearOldLocal").addEventListener("click",()=>meeraClearOldLocalData().catch(e=>{meeraRecoverySay('Clear blocked: '+e.message+'. Preserve your downloaded backup.');showStatus("formStatus","Clear blocked: "+e.message,"err");}));
   $("v9ImportButton").addEventListener("click",()=>$("v9ImportFile").click());
   $("v9ImportFile").addEventListener("change",async e=>{const f=e.target.files[0];if(!f)return;try{await v9Import(f)}catch(x){showStatus("formStatus",x.message,"err")}e.target.value=""});
   $("meeraRecoverImport").addEventListener("click",()=>$("meeraRecoverFile").click());
